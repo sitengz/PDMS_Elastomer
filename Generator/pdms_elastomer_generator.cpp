@@ -1,0 +1,1235 @@
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cctype>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <random>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "pdms_filler_component.hpp"
+
+namespace {
+
+constexpr double kAvogadroScale = 0.602; // Converts (g/mol)/(g/cm^3) to A^3.
+constexpr double kFillerZLowerFraction = -0.20;
+constexpr double kFillerZUpperFraction = 0.20;
+constexpr double kModeratorZLowerFraction = 0.28;
+constexpr double kModeratorZUpperFraction = 0.38;
+constexpr long long kMsdProductionSteps = 1000000;
+constexpr int kMsdDumpEverySteps = 1000;
+constexpr long long kMsdExpectedFrames =
+    kMsdProductionSteps / kMsdDumpEverySteps + 1;
+
+enum class Formulation { V22, V35 };
+
+struct Settings {
+    Formulation formulation = Formulation::V22;
+    int n1 = 128, m1 = 900;
+    int n2 = 32,  m2 = 0;   // M2 is resolved from stoichiometry.
+    int n3 = 0,   m3 = 0;   // PDMS filler repeat units and chains.
+    int n4 = 5,   m4 = 6;   // Five-bead star-like moderators.
+    int crosslinker_functionality = 8;
+    std::string crosslink_distribution = "random";
+    std::uint32_t crosslink_seed = 20260722u;
+    bool folded_network = false;
+    double crosslink_probability = 0.1;
+    double bead_mass = 74.0;
+    double density = 0.1;
+    double target_density = 0.8;
+    double bond_length = 2.801;
+    double spacing = 7.0;
+    double thickness = -1.0; // Negative selects the original cubic bulk box.
+    std::uint32_t seed = 5489u;
+    std::string output = "data.V22_no_filler";
+    bool output_explicit = false;
+    bool filler_length_explicit = false;
+    bool filler_weight_explicit = false;
+    double filler_weight_percent = -1.0;
+    std::uint32_t filler_seed = 20260727u;
+    double filler_minimum_separation = 4.5;
+};
+
+struct Atom { int id, molecule, type; double charge, x, y, z; };
+struct Bond { int id, type, a, b; };
+struct Angle { int id, type, a, b, c; };
+struct Dihedral { int id, type, a, b, c, d; };
+struct Box { double lx, ly, lz; };
+
+struct System {
+    std::vector<Atom> atoms;
+    std::vector<Bond> bonds;
+    std::vector<Angle> angles;
+    std::vector<Dihedral> dihedrals;
+};
+
+int parse_int(const std::string& value, const std::string& option) {
+    try { size_t used = 0; int result = std::stoi(value, &used); if (used != value.size()) throw std::invalid_argument(""); return result; }
+    catch (...) { throw std::runtime_error("Invalid integer for " + option + ": " + value); }
+}
+
+double parse_double(const std::string& value, const std::string& option) {
+    try { size_t used = 0; double result = std::stod(value, &used); if (used != value.size()) throw std::invalid_argument(""); return result; }
+    catch (...) { throw std::runtime_error("Invalid number for " + option + ": " + value); }
+}
+
+const char* formulation_name(const Settings& settings) {
+    return settings.formulation == Formulation::V22 ? "V22" : "V35";
+}
+
+Formulation parse_formulation(const std::string& value) {
+    if (value == "V22" || value == "v22") return Formulation::V22;
+    if (value == "V35" || value == "v35") return Formulation::V35;
+    throw std::runtime_error("--formulation must be V22 or V35");
+}
+
+Formulation requested_formulation(int argc, char** argv) {
+    Formulation result = Formulation::V22;
+    bool found = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) != "--formulation") continue;
+        if (found)
+            throw std::runtime_error("--formulation may be supplied only once");
+        if (i + 1 >= argc)
+            throw std::runtime_error("Missing value after --formulation");
+        result = parse_formulation(argv[i + 1]);
+        found = true;
+        ++i;
+    }
+    return result;
+}
+
+Settings formulation_defaults(Formulation formulation) {
+    Settings settings;
+    settings.formulation = formulation;
+    if (formulation == Formulation::V35) {
+        settings.n1 = 384;
+        settings.m1 = 306;
+        settings.crosslinker_functionality = 4;
+        settings.folded_network = true;
+        settings.crosslink_probability = 0.5;
+        settings.output = "data.V35_no_filler";
+    }
+    return settings;
+}
+
+void print_help(const char* program) {
+    std::cout
+        << "Usage: " << program << " [options]\n\n"
+        << "PDMS-only V22/V35 elastomer formulation generator.\n"
+        << "V22 is the default formulation, and the default contains no filler.\n\n"
+        << "  --formulation NAME  V22 or V35 (default: V22)\n"
+        << "  --n1 N --m1 M    bifunctional network strands\n"
+        << "  --n2 N           cross-linker length (default: 32); M2 is stoichiometric\n"
+        << "  --n4 N --m4 M    star-moderator size/count (N4 must be 5; defaults: 5, 6)\n"
+        << "\nOptional component-3 PDMS filler:\n"
+        << "  --filler-length N repeat units per filler chain\n"
+        << "  --filler-wt X     filler weight percent of complete formulation\n"
+        << "  --filler-seed N   filler conformation/packing seed (default: 20260727)\n"
+        << "  --filler-min-separation X  minimum filler/moderator-to-other distance in A"
+           " (default: 4.5)\n"
+        << "\nNetwork and box controls:\n"
+        << "  --functionality F cross-linker reactive sites, 3-16\n"
+        << "  --crosslink-distribution MODE\n"
+        << "                     reactive-site placement: regular or random (default: random)\n"
+        << "  --crosslink-seed N random-site seed (default: 20260722)\n"
+        << "  --mass X          bead mass in g/mol (default: 74)\n"
+        << "  --density X       initial packing density in g/cm^3 (default: 0.1)\n"
+        << "  --target-density X density after scripted compression (default: 0.8)\n"
+        << "  --bond-length X   initial bond length in angstrom (default: 2.801)\n"
+        << "  --spacing X       spacing between placed molecules (default: 7.0)\n"
+        << "  --thickness X     fixed film thickness Lz in angstrom; omit for bulk\n"
+        << "  --seed N          reproducible random seed (default: 5489)\n"
+        << "  --output FILE     override the automatically generated data filename\n"
+        << "                    a case folder is created beside this path\n"
+        << "  --help             show this help\n";
+}
+
+Settings parse_args(int argc, char** argv) {
+    Settings s = formulation_defaults(requested_formulation(argc, argv));
+    for (int i = 1; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--help") { print_help(argv[0]); std::exit(0); }
+        if (i + 1 >= argc) throw std::runtime_error("Missing value after " + option);
+        const std::string value = argv[++i];
+        if      (option == "--formulation") { /* Resolved in the first pass. */ }
+        else if (option == "--n1") s.n1 = parse_int(value, option);
+        else if (option == "--m1") s.m1 = parse_int(value, option);
+        else if (option == "--n2") s.n2 = parse_int(value, option);
+        else if (option == "--m2")
+            throw std::runtime_error("M2 is determined by M2=2*M1/functionality; do not supply --m2");
+        else if (option == "--n3" || option == "--m3")
+            throw std::runtime_error(
+                option + " is derived; use --filler-length and --filler-wt");
+        else if (option == "--n4") s.n4 = parse_int(value, option);
+        else if (option == "--m4") s.m4 = parse_int(value, option);
+        else if (option == "--filler-length") {
+            s.n3 = parse_int(value, option);
+            s.filler_length_explicit = true;
+        }
+        else if (option == "--filler-wt") {
+            s.filler_weight_percent = parse_double(value, option);
+            s.filler_weight_explicit = true;
+        }
+        else if (option == "--filler-seed")
+            s.filler_seed = static_cast<std::uint32_t>(parse_int(value, option));
+        else if (option == "--filler-min-separation")
+            s.filler_minimum_separation = parse_double(value, option);
+        else if (option == "--functionality") s.crosslinker_functionality = parse_int(value, option);
+        else if (option == "--crosslink-distribution") s.crosslink_distribution = value;
+        else if (option == "--crosslink-seed") s.crosslink_seed = static_cast<std::uint32_t>(parse_int(value, option));
+        else if (option == "--mass") s.bead_mass = parse_double(value, option);
+        else if (option == "--density") s.density = parse_double(value, option);
+        else if (option == "--target-density") s.target_density = parse_double(value, option);
+        else if (option == "--bond-length") s.bond_length = parse_double(value, option);
+        else if (option == "--spacing") s.spacing = parse_double(value, option);
+        else if (option == "--thickness") s.thickness = parse_double(value, option);
+        else if (option == "--seed") s.seed = static_cast<std::uint32_t>(parse_int(value, option));
+        else if (option == "--output") { s.output = value; s.output_explicit = true; }
+        else throw std::runtime_error("Unknown option: " + option);
+    }
+    return s;
+}
+
+std::string filename_number(double value) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(4) << value;
+    std::string result = text.str();
+    while (!result.empty() && result.back() == '0') result.pop_back();
+    if (!result.empty() && result.back() == '.') result.pop_back();
+    std::replace(result.begin(), result.end(), '.', 'p');
+    return result;
+}
+
+double filler_chain_mass(const Settings& s) {
+    return pdms_filler::chain_mass(s.n3, s.bead_mass);
+}
+
+long long filler_beads(const Settings& s) {
+    return 1LL * s.m3 * s.n3;
+}
+
+void resolve_filler_composition(Settings& s) {
+    const bool requested = s.filler_length_explicit || s.filler_weight_explicit;
+    if (!requested) {
+        s.n3 = 0;
+        s.m3 = 0;
+        if (!s.output_explicit)
+            s.output = std::string("data.") + formulation_name(s) + "_no_filler";
+        return;
+    }
+    if (!s.filler_length_explicit || !s.filler_weight_explicit)
+        throw std::runtime_error(
+            "PDMS filler requires both --filler-length and --filler-wt");
+    if (s.n3 <= 0)
+        throw std::runtime_error("--filler-length must be positive");
+    if (s.filler_weight_percent <= 0.0 || s.filler_weight_percent >= 100.0)
+        throw std::runtime_error(
+            "--filler-wt must be greater than 0 and less than 100");
+    if (s.filler_minimum_separation <= 0.0 ||
+        s.filler_minimum_separation >= 15.0)
+        throw std::runtime_error(
+            "--filler-min-separation must be greater than 0 and less than 15 A");
+
+    const long long base_beads =
+        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + 1LL*s.n4*s.m4;
+    const double base_mass = base_beads * s.bead_mass;
+    const double fraction = s.filler_weight_percent / 100.0;
+    const double desired_filler_mass = base_mass * fraction / (1.0 - fraction);
+    s.m3 = std::max(
+        1, static_cast<int>(std::lround(desired_filler_mass / filler_chain_mass(s))));
+
+    if (!s.output_explicit) {
+        s.output = std::string("data.") + formulation_name(s) + "_PDMS_N" +
+            std::to_string(s.n3) + "_" +
+            filename_number(s.filler_weight_percent) + "wt";
+    }
+}
+
+void apply_crosslinker_stoichiometry(Settings& s) {
+    if (s.crosslinker_functionality < 3)
+        throw std::runtime_error("Cross-linker functionality must be at least 3 to form a network");
+    const long long reactive_ends = 2LL * s.m1;
+    if (reactive_ends % s.crosslinker_functionality != 0) {
+        std::ostringstream message;
+        message << "Exact stoichiometry is impossible: 2*M1=" << reactive_ends
+                << " is not divisible by functionality=" << s.crosslinker_functionality;
+        throw std::runtime_error(message.str());
+    }
+    const long long molecule_count = reactive_ends / s.crosslinker_functionality;
+    if (molecule_count > 100000000LL)
+        throw std::runtime_error("Stoichiometric M2 is too large");
+    s.m2 = static_cast<int>(molecule_count);
+}
+
+void apply_geometry_filename(Settings& s) {
+    if (s.thickness > 0.0 && !s.output_explicit)
+        s.output += "_film_Lz" + filename_number(s.thickness);
+}
+
+void report_composition(const Settings& s) {
+    const int n[] = {s.n1, s.n2, s.n3, s.n4};
+    const int m[] = {s.m1, s.m2, s.m3, s.m4};
+    const long long component_beads[] = {
+        1LL*s.n1*s.m1,
+        1LL*s.n2*s.m2,
+        filler_beads(s),
+        1LL*s.n4*s.m4
+    };
+    const double component_masses[] = {
+        component_beads[0] * s.bead_mass,
+        component_beads[1] * s.bead_mass,
+        s.m3 * filler_chain_mass(s),
+        component_beads[3] * s.bead_mass
+    };
+    long long total_beads = 0;
+    long long total_molecules = 0;
+    double total_mass = 0.0;
+    for (size_t i = 0; i < 4; ++i) {
+        total_beads += component_beads[i];
+        total_mass += component_masses[i];
+    }
+    for (int count : m) total_molecules += count;
+    std::cerr << "Composition:\n";
+    for (size_t i = 0; i < 4; ++i) {
+        const double realized = total_mass == 0.0
+            ? 0.0 : 100.0 * component_masses[i] / total_mass;
+        const double mole_fraction = total_molecules == 0 ? 0.0 : 100.0 * m[i] / total_molecules;
+        std::cerr << "  component " << i + 1 << ": N=" << n[i] << ", M=" << m[i]
+                  << ", beads=" << component_beads[i]
+                  << ", mole%=" << std::fixed << std::setprecision(4) << mole_fraction
+                  << ", realized wt%=" << realized;
+        if (i == 2 && s.m3 > 0)
+            std::cerr << ", filler=PDMS"
+                      << ", requested filler wt%=" << s.filler_weight_percent;
+        std::cerr << '\n';
+    }
+    std::cerr << "  total beads=" << total_beads
+              << ", total mass=" << total_mass << " g/mol-equivalent\n";
+}
+
+void validate(const Settings& s) {
+    const int values[] = {s.n1, s.n2, s.n3, s.n4, s.m1, s.m2, s.m3, s.m4};
+    if (std::any_of(std::begin(values), std::end(values), [](int x) { return x < 0; }))
+        throw std::runtime_error("N and M values cannot be negative");
+    if (s.n4 != 5 && s.m4 != 0)
+        throw std::runtime_error("The implemented moderator is a five-bead star; use --n4 5");
+    if (s.crosslinker_functionality < 3 || s.crosslinker_functionality > 16 || s.crosslinker_functionality > s.n2)
+        throw std::runtime_error("Cross-linker functionality must be between 3 and min(16, N2)");
+    if (s.crosslink_distribution != "regular" && s.crosslink_distribution != "random")
+        throw std::runtime_error("--crosslink-distribution must be regular or random");
+    if (s.crosslink_distribution == "regular" && s.crosslinker_functionality > (s.n2 + 1) / 2)
+        throw std::runtime_error("Regular placement at 1,3,5,... requires functionality <= ceil(N2/2)");
+    if (s.bead_mass <= 0 || s.density <= 0 || s.target_density <= 0 ||
+        s.bond_length <= 0 || s.spacing <= 0)
+        throw std::runtime_error("Mass, densities, bond length, and spacing must be positive");
+    if (s.thickness == 0.0)
+        throw std::runtime_error("--thickness must be positive; omit it for the cubic bulk system");
+    const long long total_beads =
+        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + filler_beads(s) + 1LL*s.n4*s.m4;
+    if (total_beads <= 0) throw std::runtime_error("The formulation must contain at least one bead");
+    if (s.output.empty()) throw std::runtime_error("Output filename cannot be empty");
+}
+
+std::set<int> regular_sites(int functionality) {
+    std::set<int> sites;
+    for (int i = 0; i < functionality; ++i) sites.insert(1 + 2*i);
+    return sites;
+}
+
+std::set<int> random_sites(int bead_count, int functionality, std::uint32_t seed) {
+    std::vector<int> candidates(static_cast<size_t>(bead_count));
+    for (int i = 0; i < bead_count; ++i) candidates[static_cast<size_t>(i)] = i + 1;
+    std::mt19937 rng(seed);
+    std::shuffle(candidates.begin(), candidates.end(), rng);
+    return std::set<int>(candidates.begin(), candidates.begin() + functionality);
+}
+
+std::set<int> crosslinker_sites(const Settings& s) {
+    if (s.crosslink_distribution == "regular")
+        return regular_sites(s.crosslinker_functionality);
+    return random_sites(s.n2, s.crosslinker_functionality, s.crosslink_seed);
+}
+
+void add_linear_topology(System& sys, int first_atom, int bead_count) {
+    for (int i = 0; i + 1 < bead_count; ++i)
+        sys.bonds.push_back({static_cast<int>(sys.bonds.size()) + 1, 1, first_atom + i, first_atom + i + 1});
+    for (int i = 0; i + 2 < bead_count; ++i)
+        sys.angles.push_back({static_cast<int>(sys.angles.size()) + 1, 1, first_atom + i, first_atom + i + 1, first_atom + i + 2});
+    for (int i = 0; i + 3 < bead_count; ++i)
+        sys.dihedrals.push_back({static_cast<int>(sys.dihedrals.size()) + 1, 1, first_atom + i, first_atom + i + 1, first_atom + i + 2, first_atom + i + 3});
+}
+
+struct PathPoint { double x, y; };
+
+std::vector<PathPoint> folded_strand_path(int bead_count, const Box& box,
+                                          double bond_length, double spacing) {
+    std::vector<PathPoint> path;
+    if (bead_count <= 0) return path;
+    const double available_x = box.lx - 2.0 * spacing;
+    if (available_x < bond_length)
+        throw std::runtime_error("Lx is too small to place a folded network strand");
+    const int horizontal_steps_max =
+        std::max(1, static_cast<int>(std::floor(available_x / bond_length)));
+    const int connector_steps_max =
+        std::max(1, static_cast<int>(std::ceil(spacing / bond_length)));
+
+    path.reserve(static_cast<size_t>(bead_count));
+    double x = 0.0, y = 0.0;
+    int direction = 1;
+    int horizontal_steps = 0;
+    int connector_steps = 0;
+    bool connecting_rows = false;
+
+    for (int bead = 0; bead < bead_count; ++bead) {
+        path.push_back({x, y});
+        if (bead + 1 == bead_count) break;
+        if (!connecting_rows && horizontal_steps < horizontal_steps_max) {
+            x += direction * bond_length;
+            ++horizontal_steps;
+        } else if (!connecting_rows) {
+            y += bond_length;
+            connecting_rows = true;
+            connector_steps = 1;
+        } else if (connector_steps < connector_steps_max) {
+            y += bond_length;
+            ++connector_steps;
+        } else {
+            direction = -direction;
+            x += direction * bond_length;
+            horizontal_steps = 1;
+            connector_steps = 0;
+            connecting_rows = false;
+        }
+    }
+    return path;
+}
+
+void add_network_strands(System& sys, const Settings& s, const Box& box) {
+    if (s.m1 == 0) return;
+    if (s.n1 <= 0) throw std::runtime_error("A nonzero M1 requires N1 > 0");
+    if (box.ly < 2.0*s.spacing || box.lz < 2.0*s.spacing)
+        throw std::runtime_error("Ly and Lz must each be at least twice the placement spacing");
+
+    const std::vector<PathPoint> path =
+        folded_strand_path(s.n1, box, s.bond_length, s.spacing);
+    double footprint_y = 0.0;
+    for (const PathPoint& point : path) footprint_y = std::max(footprint_y, point.y);
+    if (footprint_y > box.ly - 2.0*s.spacing)
+        throw std::runtime_error("Ly is too small for the folded network-strand footprint");
+
+    const int ny = std::max(1, static_cast<int>(
+        std::floor((box.ly - 2.0*s.spacing) / (footprint_y + s.spacing))) + 1);
+    const int nz = std::max(1, static_cast<int>(box.lz / s.spacing));
+    const long long capacity = 1LL * ny * nz;
+    if (capacity < s.m1) {
+        std::ostringstream msg;
+        msg << "Folded network-strand placement capacity (" << capacity
+            << ") is smaller than M1 (" << s.m1 << "). Reduce spacing.";
+        throw std::runtime_error(msg.str());
+    }
+
+    for (int molecule_index = 0; molecule_index < s.m1; ++molecule_index) {
+        const int iy = molecule_index % ny;
+        const int iz = molecule_index / ny;
+        const bool mirror_x = molecule_index % 2 != 0;
+        const double y0 = -box.ly/2 + s.spacing +
+                          iy * (footprint_y + s.spacing);
+        const double z = -box.lz/2 + s.spacing + iz * s.spacing;
+        const int molecule_id =
+            static_cast<int>(sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
+        const int first_atom = static_cast<int>(sys.atoms.size()) + 1;
+
+        for (int bead = 1; bead <= s.n1; ++bead) {
+            const PathPoint& point = path[static_cast<size_t>(bead - 1)];
+            const double x = mirror_x
+                ? box.lx/2 - s.spacing - point.x
+                : -box.lx/2 + s.spacing + point.x;
+            const int atom_type = (bead == 1 || bead == s.n1) ? 2 : 1;
+            sys.atoms.push_back({static_cast<int>(sys.atoms.size()) + 1,
+                                 molecule_id, atom_type, 0.0, x, y0 + point.y, z});
+        }
+        add_linear_topology(sys, first_atom, s.n1);
+    }
+}
+void add_linear_component(System& sys, int bead_count, int molecule_count, int component,
+                          const Box& box, double bond_length, double spacing,
+                          const std::set<int>& reactive_sites = {}) {
+    if (bead_count == 0 && molecule_count != 0) throw std::runtime_error("A nonzero molecule count requires N > 0");
+    if (molecule_count == 0) return;
+
+    const double span = std::max(0, bead_count - 1) * bond_length;
+    if (box.lx < span + 2.0*spacing)
+        throw std::runtime_error("Lx is too small for a straight chain plus placement margins");
+    if (box.ly < 2.0*spacing || box.lz < 2.0*spacing)
+        throw std::runtime_error("Ly and Lz must each be at least twice the placement spacing");
+    const int nx = std::max(1, static_cast<int>(box.lx / (span + spacing)));
+    const int ny = std::max(1, static_cast<int>(box.ly / spacing));
+    const int nz = component == 3
+        ? std::max(1, static_cast<int>((box.lz / 2.0 - spacing) / spacing) + 1)
+        : std::max(1, static_cast<int>(box.lz / spacing));
+    const long long capacity = 1LL * nx * ny * nz;
+    if (capacity < molecule_count) {
+        std::ostringstream msg;
+        msg << "Placement grid capacity (" << capacity << ") is smaller than M" << component
+            << " (" << molecule_count << "). Reduce spacing or molecule length.";
+        throw std::runtime_error(msg.str());
+    }
+
+    for (int molecule_index = 0; molecule_index < molecule_count; ++molecule_index) {
+        const int ix = molecule_index % nx;
+        const int iy = (molecule_index / nx) % ny;
+        const int iz = molecule_index / (nx * ny);
+        const bool reverse = component != 1;
+        double x = reverse ? box.lx / 2 - spacing - ix * (span + spacing)
+                           : -box.lx / 2 + spacing + ix * (span + spacing);
+        const double y = (reverse ? box.ly / 2 - spacing : -box.ly / 2 + spacing) + (reverse ? -1 : 1) * iy * spacing;
+        double z = 0.0;
+        if (component == 2) z = box.lz / 2 - spacing - iz * spacing;
+        else if (component == 3) z = iz * spacing; // Filler starts at the midplane and grows toward +z.
+        else z = -box.lz / 2 + spacing + iz * spacing;
+
+        const int molecule_id = static_cast<int>(sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
+        const int first_atom = static_cast<int>(sys.atoms.size()) + 1;
+        for (int bead = 1; bead <= bead_count; ++bead) {
+            int atom_type = 1;
+            if (component == 1 && (bead == 1 || bead == bead_count)) atom_type = 2;
+            if (component == 2 && reactive_sites.count(bead)) atom_type = 3;
+            sys.atoms.push_back({static_cast<int>(sys.atoms.size()) + 1, molecule_id, atom_type, 0.0, x, y, z});
+            x += reverse ? -bond_length : bond_length;
+        }
+        add_linear_topology(sys, first_atom, bead_count);
+    }
+}
+
+double minimum_image(double delta, double length) {
+    return delta - std::round(delta / length) * length;
+}
+
+bool overlaps_existing(const std::vector<pdms_filler::Vec3>& candidate,
+                       const System& sys, const Box& box,
+                       double minimum_separation, bool periodic_z) {
+    const double minimum_squared = minimum_separation * minimum_separation;
+    for (const pdms_filler::Vec3& position : candidate) {
+        for (const Atom& atom : sys.atoms) {
+            double dx = minimum_image(position.x - atom.x, box.lx);
+            double dy = minimum_image(position.y - atom.y, box.ly);
+            double dz = position.z - atom.z;
+            if (periodic_z) dz = minimum_image(dz, box.lz);
+            if (dx*dx + dy*dy + dz*dz < minimum_squared)
+                return true;
+        }
+    }
+    return false;
+}
+
+void add_star_moderators(System& sys, const Settings& s, const Box& box,
+                         std::mt19937& rng) {
+    const double margin = s.bond_length;
+    if (box.lx <= 2.0*margin || box.ly <= 2.0*margin)
+        throw std::runtime_error("Lateral box dimensions are too small for a star moderator");
+    std::uniform_real_distribution<double> xdist(-box.lx/2 + margin, box.lx/2 - margin);
+    std::uniform_real_distribution<double> ydist(-box.ly/2 + margin, box.ly/2 - margin);
+    std::uniform_real_distribution<double> zdist(
+        kModeratorZLowerFraction * box.lz,
+        kModeratorZUpperFraction * box.lz);
+    for (int i = 0; i < s.m4; ++i) {
+        std::vector<pdms_filler::Vec3> candidate;
+        bool accepted = false;
+        for (int attempt = 0; attempt < 10000 && !accepted; ++attempt) {
+            const double x = xdist(rng);
+            const double y = ydist(rng);
+            const double z = zdist(rng);
+            const double b = s.bond_length;
+            candidate = {
+                {x,     y,     z},
+                {x + b, y,     z},
+                {x - b, y,     z},
+                {x,     y + b, z},
+                {x,     y - b, z}
+            };
+            accepted = !overlaps_existing(
+                candidate, sys, box, s.filler_minimum_separation,
+                s.thickness <= 0.0);
+        }
+        if (!accepted) {
+            std::ostringstream message;
+            message << "Could not place moderator " << i + 1
+                    << " without overlap in the upper-middle z region. "
+                       "Reduce the minimum separation, component loading, "
+                       "or initial density.";
+            throw std::runtime_error(message.str());
+        }
+
+        const int molecule_id = static_cast<int>(sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
+        const int center = static_cast<int>(sys.atoms.size()) + 1;
+        // Preserve the legacy force-field mapping: ordinary center, type-2 arms.
+        for (std::size_t bead = 0; bead < candidate.size(); ++bead) {
+            const pdms_filler::Vec3& position = candidate[bead];
+            sys.atoms.push_back({
+                center + static_cast<int>(bead),
+                molecule_id,
+                bead == 0 ? 1 : 2,
+                0.0,
+                position.x,
+                position.y,
+                position.z
+            });
+        }
+        for (int arm = 1; arm <= 4; ++arm)
+            sys.bonds.push_back({static_cast<int>(sys.bonds.size()) + 1, 1, center, center + arm});
+        for (int a = 1; a <= 4; ++a)
+            for (int c = a + 1; c <= 4; ++c)
+                sys.angles.push_back({static_cast<int>(sys.angles.size()) + 1, 1, center + a, center, center + c});
+    }
+}
+
+void add_pdms_filler(System& sys, const Settings& s, const Box& box) {
+    if (s.m3 == 0) return;
+    std::vector<pdms_filler::Vec3> existing;
+    existing.reserve(sys.atoms.size());
+    for (const Atom& atom : sys.atoms)
+        existing.push_back({atom.x, atom.y, atom.z});
+
+    pdms_filler::Settings filler;
+    filler.length = s.n3;
+    filler.chains = s.m3;
+    filler.seed = s.filler_seed;
+    filler.minimum_separation = s.filler_minimum_separation;
+    filler.z_lower_fraction = kFillerZLowerFraction;
+    filler.z_upper_fraction = kFillerZUpperFraction;
+    const pdms_filler::Box filler_box{
+        box.lx, box.ly, box.lz, s.thickness <= 0.0
+    };
+    const pdms_filler::Component generated =
+        pdms_filler::generate(filler, filler_box, existing);
+
+    const int atom_offset = static_cast<int>(sys.atoms.size());
+    const int molecule_offset =
+        sys.atoms.empty() ? 0 : sys.atoms.back().molecule;
+    for (const pdms_filler::Atom& atom : generated.atoms) {
+        sys.atoms.push_back({
+            static_cast<int>(sys.atoms.size()) + 1,
+            molecule_offset + atom.molecule,
+            atom.type,
+            0.0,
+            atom.position.x,
+            atom.position.y,
+            atom.position.z
+        });
+    }
+    for (const pdms_filler::Bond& bond : generated.bonds)
+        sys.bonds.push_back({
+            static_cast<int>(sys.bonds.size()) + 1, bond.type,
+            atom_offset + bond.a, atom_offset + bond.b
+        });
+    for (const pdms_filler::Angle& angle : generated.angles)
+        sys.angles.push_back({
+            static_cast<int>(sys.angles.size()) + 1, angle.type,
+            atom_offset + angle.a, atom_offset + angle.b,
+            atom_offset + angle.c
+        });
+    for (const pdms_filler::Dihedral& dihedral : generated.dihedrals)
+        sys.dihedrals.push_back({
+            static_cast<int>(sys.dihedrals.size()) + 1, dihedral.type,
+            atom_offset + dihedral.a, atom_offset + dihedral.b,
+            atom_offset + dihedral.c, atom_offset + dihedral.d
+        });
+}
+
+System build_system(const Settings& s, const Box& box) {
+    System sys;
+    const long long expected_atoms =
+        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + filler_beads(s) + 1LL*s.n4*s.m4;
+    if (expected_atoms > 100000000LL) throw std::runtime_error("Requested system is too large");
+    sys.atoms.reserve(static_cast<size_t>(expected_atoms));
+    if (s.folded_network)
+        add_network_strands(sys, s, box);
+    else
+        add_linear_component(
+            sys, s.n1, s.m1, 1, box, s.bond_length, s.spacing);
+    const std::set<int> reactive_sites = crosslinker_sites(s);
+    std::cerr << "Cross-linker type-3 sites (" << s.crosslink_distribution << "):";
+    for (int site : reactive_sites) std::cerr << ' ' << site;
+    std::cerr << '\n';
+    add_linear_component(sys, s.n2, s.m2, 2, box, s.bond_length, s.spacing,
+                         reactive_sites);
+    add_pdms_filler(sys, s, box);
+    std::mt19937 rng(s.seed);
+    add_star_moderators(sys, s, box, rng);
+    if (static_cast<long long>(sys.atoms.size()) != expected_atoms)
+        throw std::logic_error("Internal error: generated atom count does not match requested composition");
+    return sys;
+}
+
+void write_data(const Settings& s, const System& sys, const Box& box,
+                const std::string& output_path) {
+    std::ofstream out(output_path);
+    if (!out) throw std::runtime_error("Cannot open output file: " + output_path);
+    out << "LAMMPS data file for the " << formulation_name(s)
+        << " PDMS elastomer formulation\n\n"
+        << sys.atoms.size() << " atoms\n3 atom types\n"
+        << sys.bonds.size() << " bonds\n2 bond types\n"
+        << sys.angles.size() << " angles\n1 angle types\n"
+        << sys.dihedrals.size() << " dihedrals\n1 dihedral types\n\n"
+        << std::fixed << std::setprecision(6)
+        << -box.lx/2 << ' ' << box.lx/2 << " xlo xhi\n"
+        << -box.ly/2 << ' ' << box.ly/2 << " ylo yhi\n"
+        << -box.lz/2 << ' ' << box.lz/2 << " zlo zhi\n\nMasses\n\n";
+    out << "1 " << s.bead_mass << '\n'
+        << "2 " << s.bead_mass << '\n'
+        << "3 " << s.bead_mass << '\n';
+    out << "\nAtoms # full\n\n" << std::setprecision(8);
+    for (const auto& a : sys.atoms)
+        out << a.id << ' ' << a.molecule << ' ' << a.type << ' ' << a.charge << ' '
+            << a.x << ' ' << a.y << ' ' << a.z << '\n';
+    if (!sys.bonds.empty()) {
+        out << "\nBonds\n\n";
+        for (const auto& b : sys.bonds) out << b.id << ' ' << b.type << ' ' << b.a << ' ' << b.b << '\n';
+    }
+    if (!sys.angles.empty()) {
+        out << "\nAngles\n\n";
+        for (const auto& a : sys.angles) out << a.id << ' ' << a.type << ' ' << a.a << ' ' << a.b << ' ' << a.c << '\n';
+    }
+    if (!sys.dihedrals.empty()) {
+        out << "\nDihedrals\n\n";
+        for (const auto& d : sys.dihedrals) out << d.id << ' ' << d.type << ' ' << d.a << ' ' << d.b << ' ' << d.c << ' ' << d.d << '\n';
+    }
+    if (!out) throw std::runtime_error("Failed while writing output file: " + output_path);
+}
+
+struct OutputFiles {
+    std::string directory;
+    std::string data;
+    std::string data_basename;
+    std::string input;
+    std::string input_basename;
+    std::string submit;
+    std::string submit_basename;
+    std::string info;
+    std::string info_basename;
+    std::string case_name;
+};
+
+struct LjParameters {
+    double epsilon;
+    double sigma;
+    double cutoff;
+};
+
+OutputFiles output_files(const Settings& s) {
+    OutputFiles files;
+    const std::filesystem::path requested_data(s.output);
+    files.data_basename = requested_data.filename().string();
+    if (files.data_basename.empty())
+        throw std::runtime_error("Output filename cannot end with a directory separator");
+    files.case_name = files.data_basename.rfind("data.", 0) == 0
+        ? files.data_basename.substr(5) : files.data_basename;
+    if (files.case_name.empty() || files.case_name == "." || files.case_name == "..")
+        throw std::runtime_error("Cannot derive a case name from the output filename");
+
+    const std::filesystem::path directory =
+        requested_data.parent_path() / files.case_name;
+    files.directory = directory.string();
+    files.input_basename = "in." + files.case_name;
+    files.submit_basename = "submit." + files.case_name + ".sh";
+    files.info_basename = files.case_name + ".info";
+    files.data = (directory / files.data_basename).string();
+    files.input = (directory / files.input_basename).string();
+    files.submit = (directory / files.submit_basename).string();
+    files.info = (directory / files.info_basename).string();
+    return files;
+}
+
+void create_output_directory(const OutputFiles& files) {
+    std::error_code error;
+    std::filesystem::create_directories(files.directory, error);
+    if (error)
+        throw std::runtime_error(
+            "Cannot create output directory " + files.directory + ": " +
+            error.message());
+}
+
+LjParameters lj_parameters(double temperature) {
+    const double a = temperature - 186.04682;
+    const double b = 0.00758 * a;
+    const double c = 1.0 + std::exp(b);
+    const double epsilon = (4.77795 / c + 1.47169) * 0.350646;
+    const double sigma = ((7.86548e-05) * temperature + 1.27856) * 4.95013;
+    return {epsilon, sigma, sigma * std::pow(2.0, 1.0 / 6.0)};
+}
+
+std::string sanitize_job_name(const std::string& value) {
+    std::string result;
+    for (char c : value) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        result.push_back(std::isalnum(uc) || c == '_' || c == '-' ? c : '_');
+    }
+    if (result.size() > 100) result.resize(100);
+    return result.empty() ? "PDMS" : result;
+}
+
+std::string shell_single_quote(const std::string& value) {
+    std::string result = "'";
+    for (char c : value) {
+        if (c == '\'') result += "'\\''";
+        else result.push_back(c);
+    }
+    result += "'";
+    return result;
+}
+
+std::string json_escape(const std::string& value) {
+    std::ostringstream escaped;
+    for (unsigned char c : value) {
+        switch (c) {
+            case '"': escaped << "\\\""; break;
+            case '\\': escaped << "\\\\"; break;
+            case '\b': escaped << "\\b"; break;
+            case '\f': escaped << "\\f"; break;
+            case '\n': escaped << "\\n"; break;
+            case '\r': escaped << "\\r"; break;
+            case '\t': escaped << "\\t"; break;
+            default:
+                if (c < 0x20)
+                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                            << static_cast<int>(c) << std::dec << std::setfill(' ');
+                else
+                    escaped << static_cast<char>(c);
+        }
+    }
+    return escaped.str();
+}
+
+void write_lammps_input(const Settings& s, const OutputFiles& files) {
+    std::ofstream out(files.input);
+    if (!out) throw std::runtime_error("Cannot open LAMMPS input file: " + files.input);
+
+    const bool film = s.thickness > 0.0;
+    const double compression_scale = film
+        ? std::sqrt(s.density / s.target_density)
+        : std::cbrt(s.density / s.target_density);
+    const LjParameters hot = lj_parameters(800.0);
+    const LjParameters cold = lj_parameters(300.0);
+    const double hot_global_cutoff =
+        pdms_filler::maximum_repulsive_cutoff(800.0);
+    const std::string suffix = files.case_name;
+
+    out << "# Generated by the " << formulation_name(s) << " PDMS elastomer generator\n"
+        << "# Geometry: " << (film ? "film with fixed Lz" : "periodic bulk") << "\n\n"
+        << "units           real\n"
+        << "boundary        p p " << (film ? "f" : "p") << "\n"
+        << "atom_style      full\n"
+        << "bond_style      harmonic\n"
+        << "angle_style     harmonic\n"
+        << "dihedral_style  nharmonic\n"
+        << "special_bonds   lj 0 0 0.5\n"
+        << std::fixed << std::setprecision(8)
+        << "pair_style      lj/cut " << hot_global_cutoff << "\n"
+        << "comm_modify     cutoff 15\n"
+        << "read_data       " << files.data_basename
+        << " extra/bond/per/atom 4 extra/angle/per/atom 10"
+        << " extra/dihedral/per/atom 10 extra/special/per/atom 30\n\n"
+        << "mass            1 " << s.bead_mass << "\n"
+        << "mass            2 " << s.bead_mass << "\n"
+        << "mass            3 " << s.bead_mass << "\n\n"
+        << "bond_coeff      1 115.4086 2.801\n"
+        << "bond_coeff      2 115.4086 7.235\n"
+        << "angle_coeff     1 64.62431 111.623\n"
+        << "dihedral_coeff  1 4 3.280141429 -0.59019769 1.991530534 3.31026047\n\n"
+        << "# Explicit 800 K repulsive PDMS pair matrix\n";
+    pdms_filler::write_pair_matrix(out, 800.0, true);
+    out << "\n"
+        << "neighbor        2 bin\n"
+        << "neigh_modify    delay 5 every 1\n"
+        << "timestep        5\n"
+        << "thermo          1000\n"
+        << "thermo_style    custom step temp density lx ly lz pxx pyy pzz"
+        << " etotal epair ebond eangle edihed\n"
+        << "restart         100000 restart." << suffix << ".1 restart." << suffix << ".2\n"
+        << "dump            traj all custom 100000 dump." << suffix
+        << ".lammpstrj id mol type q x y z ix iy iz\n"
+        << "dump_modify     traj format line \"%d %d %d %.1f %.3f %.3f %.3f %d %d %d\" sort id\n\n";
+
+    if (film) {
+        out << "# Separate repulsive fixes for the lower and upper z box edges.\n"
+            << "fix             zlo_wall all wall/lj126 zlo EDGE "
+            << hot.epsilon << ' ' << hot.sigma << ' ' << hot.cutoff << " units box\n"
+            << "fix             zhi_wall all wall/lj126 zhi EDGE "
+            << hot.epsilon << ' ' << hot.sigma << ' ' << hot.cutoff << " units box\n\n";
+    }
+
+    out << "# 800 K relaxation\n"
+        << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
+        << "run             1000000\n"
+        << "write_data      data." << suffix << ".rep_800 nocoeff\n\n"
+        << "unfix           integrate\n\n";
+
+    if (film) {
+        out << "# Lateral compression with crosslinking at fixed film thickness\n"
+            << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
+            << "fix             xlink all bond/create 1 2 3 " << hot.cutoff
+            << " 2 iparam 1 1 jparam 1 1 prob "
+            << s.crosslink_probability << " 348154\n"
+            << "thermo_style    custom step temp density etotal epair ebond eangle"
+            << " edihed f_xlink[1] f_xlink[2] bonds\n"
+            << "fix             compress all deform 1 x scale " << compression_scale
+            << " y scale " << compression_scale << " units box\n"
+            << "run             1000000\n"
+            << "unfix           compress\n\n"
+            << "# Relax at the compressed dimensions with continued crosslinking\n"
+            << "run             1000000\n\n"
+            << "# Continue crosslinking at fixed dimensions\n"
+            << "run             2000000\n"
+            << "unfix           integrate\n"
+            << "unfix           xlink\n";
+    } else {
+        out << "# Isotropic compression with crosslinking at 800 K\n"
+            << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
+            << "fix             xlink all bond/create 1 2 3 " << hot.cutoff
+            << " 2 iparam 1 1 jparam 1 1 prob "
+            << s.crosslink_probability << " 348154\n"
+            << "thermo_style    custom step temp density etotal epair ebond eangle"
+            << " edihed f_xlink[1] f_xlink[2] bonds\n"
+            << "fix             compress all deform 1 x scale " << compression_scale
+            << " y scale " << compression_scale << " z scale " << compression_scale
+            << " units box\n"
+            << "run             1000000\n"
+            << "unfix           compress\n\n"
+            << "# Relax at the compressed dimensions with continued crosslinking\n"
+            << "run             1000000\n\n"
+            << "# Continue crosslinking at fixed dimensions\n"
+            << "run             2000000\n"
+            << "unfix           integrate\n"
+            << "unfix           xlink\n";
+    }
+
+    out << "thermo_style    custom step temp density lx ly lz pxx pyy pzz"
+        << " etotal epair ebond eangle edihed\n\n"
+        << "write_data      data." << suffix << ".xlink_800 nocoeff\n\n"
+        << "# Restore the reacted-bond equilibrium length and 300 K pair interaction\n"
+        << "bond_coeff      2 115.4086 2.801\n"
+        << "pair_style      lj/gromacs 12 15\n";
+    pdms_filler::write_pair_matrix(out, 300.0, false);
+    out << "\n";
+
+    if (film) {
+        out << "unfix           zlo_wall\n"
+            << "unfix           zhi_wall\n"
+            << "fix             zlo_wall all wall/lj126 zlo EDGE "
+            << cold.epsilon << ' ' << cold.sigma << ' ' << cold.cutoff << " units box\n"
+            << "fix             zhi_wall all wall/lj126 zhi EDGE "
+            << cold.epsilon << ' ' << cold.sigma << ' ' << cold.cutoff << " units box\n";
+    }
+
+    out << "thermo_style    custom step temp density lx ly lz pxx pyy pzz"
+        << " etotal epair ebond eangle edihed\n\n"
+        << "# Cool from 800 K to 300 K\n";
+
+    if (film) {
+        out << "fix             integrate all npt temp 800.0 300.0 50.0"
+            << " x 1.0 1.0 500.0 y 1.0 1.0 500.0 couple xy\n";
+    } else {
+        out << "fix             integrate all npt temp 800.0 300.0 50.0"
+            << " iso 1.0 1.0 500.0\n";
+    }
+
+    out << "run             1000000\n"
+        << "write_data      data." << suffix << ".300 nocoeff\n"
+        << "unfix           integrate\n\n"
+        << "# Final 300 K equilibration\n";
+
+    if (film) {
+        out << "fix             integrate all npt temp 300.0 300.0 50.0"
+            << " x 1.0 1.0 500.0 y 1.0 1.0 500.0 couple xy\n";
+    } else {
+        out << "fix             integrate all npt temp 300.0 300.0 50.0"
+            << " iso 1.0 1.0 500.0\n";
+    }
+
+    out << "run             1000000\n"
+        << "write_data      data." << suffix << ".npt_eq nocoeff\n\n"
+        << "# 1M-step, 300 K NVT trajectory for MSD analysis\n"
+        << "unfix           integrate\n"
+        << "undump          traj\n"
+        << "reset_timestep  0\n\n"
+        << "dump            msd all custom " << kMsdDumpEverySteps
+        << " dump.msd.lammpstrj id mol type x y z ix iy iz\n"
+        << "dump_modify     msd first no sort id\n\n"
+        << "fix             msd_integrate all nvt temp 300.0 300.0 50.0\n"
+        << "run             " << kMsdProductionSteps << "\n\n"
+        << "unfix           msd_integrate\n"
+        << "undump          msd\n";
+
+    if (!out) throw std::runtime_error("Failed while writing LAMMPS input file: " + files.input);
+}
+
+void write_submit_script(const OutputFiles& files) {
+    std::ofstream out(files.submit);
+    if (!out) throw std::runtime_error("Cannot open Slurm submit file: " + files.submit);
+    out << "#!/bin/bash\n"
+        << "#SBATCH --job-name=" << sanitize_job_name(files.case_name) << "_xlink\n"
+        << "#SBATCH --time=48:00:00\n"
+        << "#SBATCH --nodes=1\n"
+        << "#SBATCH --ntasks-per-node=96\n"
+        << "#SBATCH --mem=200G\n"
+        << "#SBATCH --partition=nova\n"
+        << "#SBATCH --mail-user=siteng@iastate.edu\n"
+        << "#SBATCH --mail-type=END,FAIL\n"
+        << "#SBATCH --output=slurm-%j.out\n"
+        << "#SBATCH --error=slurm-%j.err\n\n"
+        << "set -euo pipefail\n"
+        << "cd -- \"${SLURM_SUBMIT_DIR:?SLURM_SUBMIT_DIR is not set}\"\n\n"
+        << "module purge\n"
+        << "module load intel/22.3.1\n"
+        << "module load mpi/2021.7.1\n"
+        << "module load lammps/20230802.2-py310-openmpi4-ezoqd7f\n\n"
+        << "export OMP_NUM_THREADS=1\n\n"
+        << "INPUT=" << shell_single_quote(files.input_basename) << "\n"
+        << "OUTPUT=" << shell_single_quote("out." + files.case_name) << "\n"
+        << "srun lmp -in \"$INPUT\" > \"$OUTPUT\"\n";
+    if (!out) throw std::runtime_error("Failed while writing Slurm submit file: " + files.submit);
+}
+
+void write_info(const Settings& s, const System& sys, const Box& box,
+                const OutputFiles& files) {
+    std::ofstream out(files.info);
+    if (!out) throw std::runtime_error("Cannot open model info file: " + files.info);
+
+    const int n[] = {s.n1, s.n2, s.n3, s.n4};
+    const int m[] = {s.m1, s.m2, s.m3, s.m4};
+    const char* names[] = {"network_strands", "crosslinkers", "pdms_filler",
+                           "star_moderators"};
+    const long long component_beads[] = {
+        1LL*s.n1*s.m1,
+        1LL*s.n2*s.m2,
+        filler_beads(s),
+        1LL*s.n4*s.m4
+    };
+    const double component_masses[] = {
+        component_beads[0] * s.bead_mass,
+        component_beads[1] * s.bead_mass,
+        s.m3 * filler_chain_mass(s),
+        component_beads[3] * s.bead_mass
+    };
+    long long total_beads = 0;
+    long long total_molecules = 0;
+    double total_mass = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        total_beads += component_beads[i];
+        total_molecules += m[i];
+        total_mass += component_masses[i];
+    }
+    const double volume = box.lx * box.ly * box.lz;
+    const double realized_filler_wt = total_mass == 0.0
+        ? 0.0 : 100.0 * component_masses[2] / total_mass;
+    const double compression_scale = s.thickness > 0.0
+        ? std::sqrt(s.density / s.target_density)
+        : std::cbrt(s.density / s.target_density);
+    const LjParameters hot = lj_parameters(800.0);
+    const LjParameters cold = lj_parameters(300.0);
+    const std::set<int> sites = crosslinker_sites(s);
+
+    out << std::fixed << std::setprecision(8)
+        << "{\n"
+        << "  \"format\": \"" << formulation_name(s) << "-model-info\",\n"
+        << "  \"format_version\": 2,\n"
+        << "  \"formulation\": \"" << formulation_name(s) << "\",\n"
+        << "  \"case_name\": \"" << json_escape(files.case_name) << "\",\n"
+        << "  \"geometry\": \"" << (s.thickness > 0.0 ? "film" : "bulk") << "\",\n"
+        << "  \"film_thickness_angstrom\": ";
+    if (s.thickness > 0.0) out << s.thickness;
+    else out << "null";
+    out << ",\n  \"film_thickness_source\": ";
+    if (s.thickness > 0.0)
+        out << "\"command-line value captured from the equilibrated bulk result\"";
+    else
+        out << "null";
+    out << ",\n"
+        << "  \"files\": {\n"
+        << "    \"data\": \"" << json_escape(files.data_basename) << "\",\n"
+        << "    \"lammps_input\": \"" << json_escape(files.input_basename) << "\",\n"
+        << "    \"slurm_submit\": \"" << json_escape(files.submit_basename) << "\",\n"
+        << "    \"model_info\": \"" << json_escape(files.info_basename) << "\"\n"
+        << "  },\n"
+        << "  \"components\": {\n";
+    for (int i = 0; i < 4; ++i) {
+        const long long beads = component_beads[i];
+        const double weight_percent = total_mass == 0.0
+            ? 0.0 : 100.0 * component_masses[i] / total_mass;
+        const double molecule_percent = total_molecules == 0 ? 0.0 : 100.0 * m[i] / total_molecules;
+        out << "    \"" << names[i] << "\": {\"N\": " << n[i] << ", \"M\": " << m[i]
+            << ", \"beads\": " << beads << ", \"weight_percent\": " << weight_percent
+            << ", \"molecule_percent\": " << molecule_percent << "}"
+            << (i == 3 ? "\n" : ",\n");
+    }
+    out << "  },\n"
+        << "  \"composition\": {\n"
+        << "    \"total_beads\": " << total_beads << ",\n"
+        << "    \"total_mass_g_per_mol_equivalent\": " << total_mass << ",\n"
+        << "    \"total_molecules\": " << total_molecules << ",\n"
+        << "    \"requested_filler_weight_percent\": ";
+    if (s.m3 > 0) out << s.filler_weight_percent;
+    else out << "null";
+    out << ",\n"
+        << "    \"realized_filler_weight_percent\": " << realized_filler_wt << "\n"
+        << "  },\n"
+        << "  \"pdms_filler\": {\n"
+        << "    \"enabled\": " << (s.m3 > 0 ? "true" : "false") << ",\n"
+        << "    \"repeat_units_per_chain\": " << s.n3 << ",\n"
+        << "    \"chain_count\": " << s.m3 << ",\n"
+        << "    \"beads_per_chain\": " << s.n3 << ",\n"
+        << "    \"chain_mass_g_per_mol\": " << filler_chain_mass(s) << ",\n"
+        << "    \"minimum_separation_angstrom\": " << s.filler_minimum_separation << ",\n"
+        << "    \"initial_z_region\": \"central_40_percent_of_box\",\n"
+        << "    \"initial_z_lower_fraction_of_Lz\": " << kFillerZLowerFraction << ",\n"
+        << "    \"initial_z_upper_fraction_of_Lz\": " << kFillerZUpperFraction << ",\n"
+        << "    \"special_bonds_lj\": [0.0, 0.0, 0.5]\n"
+        << "  },\n"
+        << "  \"force_field\": {\n"
+        << "    \"atom_types\": {\n"
+        << "      \"1\": {\"name\": \"neutral DMS\", \"mass\": " << s.bead_mass << "},\n"
+        << "      \"2\": {\"name\": \"reactive DMS strand/moderator\", \"mass\": " << s.bead_mass << "},\n"
+        << "      \"3\": {\"name\": \"reactive DMS crosslinker\", \"mass\": " << s.bead_mass << "}\n"
+        << "    },\n"
+        << "    \"special_bonds_lj\": [0.0, 0.0, 0.5],\n"
+        << "    \"bond_type_map\": {\"ordinary_pdms\": 1, \"moderator_internal\": 1, \"formulation_crosslink\": 2}\n"
+        << "  },\n"
+        << "  \"crosslinker\": {\n"
+        << "    \"functionality\": " << s.crosslinker_functionality << ",\n"
+        << "    \"distribution\": \"" << json_escape(s.crosslink_distribution) << "\",\n"
+        << "    \"reactive_bead_sites\": [";
+    bool first = true;
+    for (int site : sites) {
+        if (!first) out << ", ";
+        out << site;
+        first = false;
+    }
+    out << "],\n"
+        << "    \"type2_sites_total_including_moderators\": " << 2LL*s.m1 + 4LL*s.m4 << ",\n"
+        << "    \"type3_sites_total\": " << 1LL*s.m2*s.crosslinker_functionality << "\n"
+        << "  },\n"
+        << "  \"initial_state\": {\n"
+        << "    \"bead_mass_g_per_mol\": " << s.bead_mass << ",\n"
+        << "    \"density_g_per_cm3\": " << s.density << ",\n"
+        << "    \"box_angstrom\": {\"Lx\": " << box.lx << ", \"Ly\": " << box.ly
+        << ", \"Lz\": " << box.lz << "},\n"
+        << "    \"volume_angstrom3\": " << volume << ",\n"
+        << "    \"bond_length_angstrom\": " << s.bond_length << ",\n"
+        << "    \"placement_spacing_angstrom\": " << s.spacing << ",\n"
+        << "    \"intercomponent_minimum_separation_angstrom\": "
+        << s.filler_minimum_separation << ",\n"
+        << "    \"component_z_placement\": {\n"
+        << "      \"network\": \"bottom_up\",\n"
+        << "      \"crosslinker\": \"top_down\",\n"
+        << "      \"pdms_filler_fraction_of_Lz\": ["
+        << kFillerZLowerFraction << ", " << kFillerZUpperFraction << "],\n"
+        << "      \"moderator_fraction_of_Lz\": ["
+        << kModeratorZLowerFraction << ", " << kModeratorZUpperFraction << "]\n"
+        << "    },\n"
+        << "    \"network_strand_initial_shape\": \""
+        << (s.folded_network ? "folded_serpentine" : "straight_linear")
+        << "\"\n"
+        << "  },\n"
+        << "  \"topology\": {\n"
+        << "    \"atoms\": " << sys.atoms.size() << ",\n"
+        << "    \"bonds\": " << sys.bonds.size() << ",\n"
+        << "    \"angles\": " << sys.angles.size() << ",\n"
+        << "    \"dihedrals\": " << sys.dihedrals.size() << "\n"
+        << "  },\n"
+        << "  \"random_seeds\": {\n"
+        << "    \"crosslink_site_seed\": " << s.crosslink_seed << ",\n"
+        << "    \"star_moderator_seed\": " << s.seed << ",\n"
+        << "    \"pdms_filler_seed\": " << s.filler_seed << ",\n"
+        << "    \"bond_creation_seed\": 348154\n"
+        << "  },\n"
+        << "  \"simulation_template\": {\n"
+        << "    \"target_compressed_density_g_per_cm3\": " << s.target_density << ",\n"
+        << "    \"compression_scale_per_deformed_dimension\": " << compression_scale << ",\n"
+        << "    \"hot_temperature_K\": 800.0,\n"
+        << "    \"final_temperature_K\": 300.0,\n"
+        << "    \"wall_style\": ";
+    if (s.thickness > 0.0)
+        out << "\"separate wall/lj126 fixes at zlo EDGE and zhi EDGE\"";
+    else out << "null";
+    out << ",\n"
+        << "    \"hot_lj\": {\"epsilon\": " << hot.epsilon << ", \"sigma\": " << hot.sigma
+        << ", \"cutoff\": " << hot.cutoff << "},\n"
+        << "    \"cold_lj\": {\"epsilon\": " << cold.epsilon << ", \"sigma\": " << cold.sigma
+        << ", \"cutoff\": " << cold.cutoff << "},\n"
+        << "    \"timestep_fs\": 5.0,\n"
+        << "    \"equilibration_run_steps\": 7000000,\n"
+        << "    \"total_run_steps\": 8000000,\n"
+        << "    \"bond_creation_active_steps\": 4000000,\n"
+        << "    \"bond_creation_probability\": "
+        << s.crosslink_probability << ",\n"
+        << "    \"msd_production\": {\n"
+        << "      \"ensemble\": \"NVT\",\n"
+        << "      \"temperature_K\": 300.0,\n"
+        << "      \"steps\": " << kMsdProductionSteps << ",\n"
+        << "      \"duration_ns\": 5.0,\n"
+        << "      \"dump_every_steps\": " << kMsdDumpEverySteps << ",\n"
+        << "      \"expected_frames\": " << kMsdExpectedFrames << ",\n"
+        << "      \"trajectory_file\": \"dump.msd.lammpstrj\",\n"
+        << "      \"coordinates\": \"wrapped x y z with image flags ix iy iz\"\n"
+        << "    }\n"
+        << "  }\n"
+        << "}\n";
+    if (!out) throw std::runtime_error("Failed while writing model info file: " + files.info);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    try {
+        Settings settings = parse_args(argc, argv);
+        apply_crosslinker_stoichiometry(settings);
+        resolve_filler_composition(settings);
+        apply_geometry_filename(settings);
+        validate(settings);
+        report_composition(settings);
+        const long long base_beads =
+            1LL*settings.n1*settings.m1 + 1LL*settings.n2*settings.m2 +
+            1LL*settings.n4*settings.m4;
+        const double total_mass =
+            base_beads * settings.bead_mass +
+            settings.m3 * filler_chain_mass(settings);
+        const double volume =
+            total_mass / (settings.density * kAvogadroScale);
+        Box box{};
+        if (settings.thickness > 0.0) {
+            box.lz = settings.thickness;
+            box.lx = box.ly = std::sqrt(volume / box.lz);
+        } else {
+            box.lx = box.ly = box.lz = std::cbrt(volume);
+        }
+        const System system = build_system(settings, box);
+        const OutputFiles files = output_files(settings);
+        create_output_directory(files);
+        write_data(settings, system, box, files.data);
+        write_lammps_input(settings, files);
+        write_submit_script(files);
+        write_info(settings, system, box, files);
+        std::cerr << "Wrote model package:\n"
+                  << "  " << files.data << "\n"
+                  << "  " << files.input << "\n"
+                  << "  " << files.submit << "\n"
+                  << "  " << files.info << "\n"
+                  << "System: " << system.atoms.size() << " atoms, "
+                  << system.bonds.size() << " bonds, " << system.angles.size() << " angles, "
+                  << system.dihedrals.size() << " dihedrals; box "
+                  << box.lx << " x " << box.ly << " x " << box.lz << " A\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
+}
