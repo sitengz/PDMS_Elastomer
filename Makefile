@@ -5,7 +5,8 @@ BIN := bin
 .PHONY: all clean test
 
 all: $(BIN)/pdms_elastomer_generator $(BIN)/z_profile \
-	$(BIN)/final_snapshot_analyzer $(BIN)/msd_analyzer
+	$(BIN)/final_snapshot_analyzer $(BIN)/msd_analyzer \
+	$(BIN)/binary_morphology_analyzer
 
 $(BIN):
 	mkdir -p $(BIN)
@@ -22,9 +23,11 @@ $(BIN)/final_snapshot_analyzer: Analysis/final_snapshot_analyzer.cpp | $(BIN)
 $(BIN)/msd_analyzer: Analysis/msd_analyzer.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) -fopenmp $< -o $@
 
+$(BIN)/binary_morphology_analyzer: Analysis/binary_morphology_analyzer.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 test: all
 	bash tests/smoke_test.sh
 
 clean:
 	rm -rf $(BIN)
-

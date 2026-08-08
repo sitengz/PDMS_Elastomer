@@ -113,7 +113,8 @@ different cluster.
 ## Analysis
 
 See [Analysis/README.md](Analysis/README.md) for the z-density profile, final
-snapshot/network report, and filler/all-system MSD workflows.
+snapshot/network report, filler/all-system MSD, and binary elastomer–filler
+morphology workflows.
 
 ## Repository layout
 
@@ -122,5 +123,7 @@ snapshot/network report, and filler/all-system MSD workflows.
 - `Analysis/z_profile.cpp`: overlapping-window density and composition profiles
 - `Analysis/final_snapshot_analyzer.cpp`: conversion, topology, and end-to-end report
 - `Analysis/msd_analyzer.cpp`: bead or molecular-COM MSD and diffusion fitting
+- `Analysis/binary_morphology_analyzer.cpp`: local composition, structure factor,
+  and filler-chain contact graph
+- `Analysis/plot_binary_field_3d.m`: MATLAB visualization of the final binary field
 - `tests/smoke_test.sh`: compile and output-namespace regression checks
-

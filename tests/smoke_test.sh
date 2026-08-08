@@ -48,4 +48,18 @@ grep -q 'prob 0.50000000' "$v35_dir/in.V35_PDMS_N8_5wt_film_Lz40"
 test "$(grep -c 'wall/lj126' "$v35_dir/in.V35_PDMS_N8_5wt_film_Lz40")" -eq 4
 grep -q '"expected_frames": 1001' "$v22_dir/V22_no_filler.info"
 
+"$repo_root/bin/binary_morphology_analyzer" \
+    "$v35_dir/data.V35_PDMS_N8_5wt_film_Lz40" \
+    "$v35_dir/V35_PDMS_N8_5wt_film_Lz40.info" \
+    --grid-spacing 8 --contact-cutoff 8 \
+    --output "$test_root/morphology_metrics.dat" \
+    --structure-output "$test_root/morphology_structure.dat" \
+    --field-output "$test_root/morphology_field.dat" \
+    --report-output "$test_root/morphology_report.txt" >/dev/null
+awk 'NF != 22 { exit 1 }' "$test_root/morphology_metrics.dat"
+awk 'NF != 10 { exit 1 }' "$test_root/morphology_field.dat"
+test -s "$test_root/morphology_structure.dat"
+grep -q 'BINARY ELASTOMER/FILLER MORPHOLOGY ANALYSIS' \
+    "$test_root/morphology_report.txt"
+
 echo "PDMS elastomer smoke tests passed"
