@@ -47,6 +47,13 @@ struct Settings {
     int star_arm_count = 4;
     bool star_arm_count_explicit = false;
     int star_arm_length = 0; // Resolved from N1 when the topology is star.
+    int graft_backbone_length = 64;
+    int graft_side_chain_length = 16;
+    int graft_spacing = 12;
+    double graft_functional_fraction = 40.0;
+    int graft_side_chain_count = 0;
+    int graft_functional_count = 0;
+    bool graft_option_explicit = false;
     std::string strand_reactive_distribution = "regular";
     std::uint32_t strand_reactive_seed = 20260810u;
     int stoichiometry_strand_groups = 1;
@@ -136,6 +143,22 @@ void apply_option(Settings& s, const std::string& option,
         s.star_arm_count = parse_int(value, option);
         s.star_arm_count_explicit = true;
     }
+    else if (option == "--backbone-length") {
+        s.graft_backbone_length = parse_int(value, option);
+        s.graft_option_explicit = true;
+    }
+    else if (option == "--side-chain-length") {
+        s.graft_side_chain_length = parse_int(value, option);
+        s.graft_option_explicit = true;
+    }
+    else if (option == "--graft-spacing") {
+        s.graft_spacing = parse_int(value, option);
+        s.graft_option_explicit = true;
+    }
+    else if (option == "--graft-functional-fraction") {
+        s.graft_functional_fraction = parse_double(value, option);
+        s.graft_option_explicit = true;
+    }
     else if (option == "--strand-reactive-distribution")
         s.strand_reactive_distribution = value;
     else if (option == "--strand-reactive-seed")
@@ -222,16 +245,23 @@ void print_help(const char* program) {
         << "Usage: " << program << " [options]\n\n"
         << "Generic coarse-grained PDMS elastomer generator.\n\n"
         << "Components are written in this molecule-ID order:\n"
-        << "  1. linear, ring, or star strands\n"
+        << "  1. linear, ring, star, or grafted-backbone strands\n"
         << "  2. functional short-chain crosslinkers\n"
         << "  3. optional five-bead star moderators\n"
         << "  4. optional neutral PDMS filler chains\n\n"
         << "  --strand-length N       beads per linear/ring strand, or per star arm\n"
         << "                          (default: 128; star-arm default: 32)\n"
         << "  --strand-count M        number of strands (default: 900)\n"
-        << "  --strand-topology TYPE  linear, ring, or star (default: linear)\n"
+        << "  --strand-topology TYPE  linear, ring, star, or grafted (default: linear)\n"
         << "  --strand-functionality F reactive sites; derived from arms for stars\n"
         << "  --strand-arm-count A    star arms: 3, 4, 6, or 8 (default: 4)\n"
+        << "  --backbone-length N     grafted backbone beads (default: 64)\n"
+        << "  --side-chain-length N   beads per grafted side chain (default: 16)\n"
+        << "  --graft-spacing N       ungrafted beads between grafts; 0 grafts every bead\n"
+        << "                          (default: 12)\n"
+        << "  --graft-functional-fraction X\n"
+        << "                          percent of side-chain ends that are functional\n"
+        << "                          (default: 40)\n"
         << "  --strand-reactive-distribution MODE\n"
         << "                          ring sites: regular or random (default: regular)\n"
         << "  --strand-reactive-seed N random ring-site seed (default: 20260810)\n"
@@ -269,12 +299,57 @@ int star_center_count(int arm_count) {
 }
 
 void resolve_strand_architecture(Settings& s) {
+    if (s.strand_topology == "grafted") {
+        if (s.star_arm_count_explicit)
+            throw std::runtime_error(
+                "--strand-arm-count requires --strand-topology star");
+        if (s.strand_length_explicit)
+            throw std::runtime_error(
+                "Use --backbone-length and --side-chain-length for grafted strands");
+        if (s.graft_backbone_length <= 0 || s.graft_side_chain_length <= 0)
+            throw std::runtime_error(
+                "Grafted backbone and side-chain lengths must be positive");
+        if (s.graft_spacing < 0)
+            throw std::runtime_error("Graft spacing cannot be negative");
+        if (s.graft_functional_fraction <= 0.0 ||
+            s.graft_functional_fraction > 100.0)
+            throw std::runtime_error(
+                "Graft functional fraction must be greater than 0 and at most 100 percent");
+        const long long interval = 1LL + s.graft_spacing;
+        s.graft_side_chain_count = static_cast<int>(
+            (s.graft_backbone_length + interval - 1) / interval);
+        s.graft_functional_count = std::max(
+            1, static_cast<int>(std::lround(
+                s.graft_side_chain_count *
+                s.graft_functional_fraction / 100.0)));
+        s.graft_functional_count = std::min(
+            s.graft_functional_count, s.graft_side_chain_count);
+        if (s.strand_functionality_explicit &&
+            s.strand_functionality != s.graft_functional_count)
+            throw std::runtime_error(
+                "Grafted strand functionality is derived from the functional fraction");
+        const long long total_beads = s.graft_backbone_length +
+            1LL*s.graft_side_chain_count*s.graft_side_chain_length;
+        if (total_beads > 100000000LL)
+            throw std::runtime_error("Grafted strand bead count is too large");
+        s.n1 = static_cast<int>(total_beads);
+        s.strand_functionality = s.graft_functional_count;
+        return;
+    }
+
     if (s.strand_topology != "star") {
         if (s.star_arm_count_explicit)
             throw std::runtime_error(
                 "--strand-arm-count requires --strand-topology star");
+        if (s.graft_option_explicit)
+            throw std::runtime_error(
+                "Grafted-backbone options require --strand-topology grafted");
         return;
     }
+
+    if (s.graft_option_explicit)
+        throw std::runtime_error(
+            "Grafted-backbone options require --strand-topology grafted");
 
     const int centers = star_center_count(s.star_arm_count);
     if (!s.strand_length_explicit) s.n1 = 32;
@@ -459,12 +534,15 @@ void validate(const Settings& s) {
     if (s.n1 <= 0 || s.m1 <= 0)
         throw std::runtime_error("Strand length and strand count must be positive");
     if (s.strand_topology != "linear" && s.strand_topology != "ring" &&
-        s.strand_topology != "star")
+        s.strand_topology != "star" && s.strand_topology != "grafted")
         throw std::runtime_error(
-            "--strand-topology must be linear, ring, or star");
-    if (s.strand_functionality < 2 || s.strand_functionality > s.n1)
+            "--strand-topology must be linear, ring, star, or grafted");
+    const int minimum_strand_functionality =
+        s.strand_topology == "grafted" ? 1 : 2;
+    if (s.strand_functionality < minimum_strand_functionality ||
+        s.strand_functionality > s.n1)
         throw std::runtime_error(
-            "Strand functionality must be between 2 and the strand length");
+            "Strand functionality is outside the valid range");
     if (s.strand_reactive_distribution != "regular" &&
         s.strand_reactive_distribution != "random")
         throw std::runtime_error(
@@ -490,6 +568,15 @@ void validate(const Settings& s) {
             throw std::logic_error(
                 "Internal error: star functionality does not match arm count");
         star_center_count(s.star_arm_count);
+    }
+    if (s.strand_topology == "grafted") {
+        if (s.graft_backbone_length <= 0 || s.graft_side_chain_length <= 0 ||
+            s.graft_side_chain_count <= 0 || s.graft_functional_count <= 0)
+            throw std::logic_error(
+                "Internal error: invalid resolved grafted architecture");
+        if (s.strand_functionality != s.graft_functional_count)
+            throw std::logic_error(
+                "Internal error: grafted functionality mismatch");
     }
     if (s.n3 != 5 && s.m3 != 0)
         throw std::runtime_error("The implemented moderator is a five-bead star");
@@ -529,8 +616,40 @@ std::set<int> random_sites(int bead_count, int functionality, std::uint32_t seed
     return std::set<int>(candidates.begin(), candidates.begin() + functionality);
 }
 
+std::vector<int> graft_backbone_sites(const Settings& s) {
+    std::vector<int> sites;
+    const int interval = s.graft_spacing + 1;
+    for (int site = 0; site < s.graft_backbone_length; site += interval)
+        sites.push_back(site);
+    return sites;
+}
+
+std::set<int> graft_functional_side_indices(const Settings& s) {
+    std::set<int> indices;
+    for (int functional = 0; functional < s.graft_functional_count;
+         ++functional) {
+        int index = static_cast<int>(std::floor(
+            (functional + 0.5) * s.graft_side_chain_count /
+            s.graft_functional_count));
+        index = std::min(index, s.graft_side_chain_count - 1);
+        indices.insert(index);
+    }
+    if (static_cast<int>(indices.size()) != s.graft_functional_count)
+        throw std::logic_error(
+            "Internal error: grafted functional-site selection is not unique");
+    return indices;
+}
+
 std::set<int> strand_sites(const Settings& s) {
     if (s.strand_topology == "linear") return {1, s.n1};
+    if (s.strand_topology == "grafted") {
+        std::set<int> sites;
+        for (int side : graft_functional_side_indices(s))
+            sites.insert(
+                s.graft_backbone_length +
+                (side + 1)*s.graft_side_chain_length);
+        return sites;
+    }
     if (s.strand_topology == "star") {
         std::set<int> sites;
         const int centers = star_center_count(s.star_arm_count);
@@ -552,7 +671,14 @@ std::string strand_reactive_distribution_name(const Settings& s) {
     if (s.strand_topology == "ring")
         return s.strand_reactive_distribution;
     if (s.strand_topology == "star") return "arm_ends";
+    if (s.strand_topology == "grafted")
+        return "selected_side_chain_ends";
     return "ends";
+}
+
+std::string grafted_architecture_label(const Settings& s) {
+    if (s.strand_topology != "grafted") return "not_applicable";
+    return s.graft_spacing == 0 ? "dense_bottlebrush" : "comb_like";
 }
 
 std::set<int> crosslinker_sites(const Settings& s) {
@@ -590,6 +716,32 @@ struct StarArchitecture {
     std::vector<int> attachment_centers;
     std::vector<std::pair<int, int>> edges;
 };
+
+struct GraftedArchitecture {
+    std::vector<int> graft_sites;
+    std::vector<std::pair<int, int>> edges;
+};
+
+GraftedArchitecture grafted_architecture(const Settings& s) {
+    GraftedArchitecture architecture;
+    architecture.graft_sites = graft_backbone_sites(s);
+    if (static_cast<int>(architecture.graft_sites.size()) !=
+        s.graft_side_chain_count)
+        throw std::logic_error(
+            "Internal error: resolved graft count does not match graft sites");
+    for (int bead = 0; bead + 1 < s.graft_backbone_length; ++bead)
+        architecture.edges.push_back({bead, bead + 1});
+    for (int side = 0; side < s.graft_side_chain_count; ++side) {
+        const int first = s.graft_backbone_length +
+                          side*s.graft_side_chain_length;
+        architecture.edges.push_back({
+            architecture.graft_sites[static_cast<std::size_t>(side)], first
+        });
+        for (int bead = 1; bead < s.graft_side_chain_length; ++bead)
+            architecture.edges.push_back({first + bead - 1, first + bead});
+    }
+    return architecture;
+}
 
 StarArchitecture star_architecture(const Settings& s) {
     StarArchitecture architecture;
@@ -663,6 +815,10 @@ TopologyCounts strand_topology_counts(const Settings& s) {
         return {s.n1, s.n1, s.n1};
     if (s.strand_topology == "star") {
         const StarArchitecture architecture = star_architecture(s);
+        return graph_topology_counts(s.n1, architecture.edges);
+    }
+    if (s.strand_topology == "grafted") {
+        const GraftedArchitecture architecture = grafted_architecture(s);
         return graph_topology_counts(s.n1, architecture.edges);
     }
     return {
@@ -858,7 +1014,7 @@ void add_ring_strands(System& sys, const Settings& s, const Box& box,
     }
 }
 
-bool star_internal_geometry_allowed(
+bool internal_geometry_allowed(
     const std::vector<pdms_filler::Vec3>& positions,
     const std::vector<std::vector<int>>& adjacency
 ) {
@@ -1038,7 +1194,7 @@ std::vector<pdms_filler::Vec3> build_local_star(
         }
         if (!built) continue;
         ++complete_candidates;
-        if (!star_internal_geometry_allowed(positions, adjacency))
+        if (!internal_geometry_allowed(positions, adjacency))
             continue;
         ++internally_allowed_candidates;
 
@@ -1073,7 +1229,181 @@ std::vector<pdms_filler::Vec3> build_local_star(
     throw std::runtime_error(message.str());
 }
 
-struct StarPlacementGrid {
+std::vector<pdms_filler::Vec3> compact_grafted_backbone(
+    int bead_count,
+    int beads_per_turn
+) {
+    using pdms_filler::Vec3;
+    constexpr double pitch = 4.8;
+    const double z_step = pitch / beads_per_turn;
+    const double theta_step = 2.0*kPi / beads_per_turn;
+    const double lateral_step = std::sqrt(
+        kBondLengthAngstrom*kBondLengthAngstrom - z_step*z_step);
+    const double radius = lateral_step /
+        (2.0*std::sin(0.5*theta_step));
+    std::vector<Vec3> backbone(static_cast<std::size_t>(bead_count));
+    for (int bead = 0; bead < bead_count; ++bead) {
+        const double theta = bead*theta_step;
+        backbone[static_cast<std::size_t>(bead)] = {
+            radius*std::cos(theta), radius*std::sin(theta), bead*z_step
+        };
+    }
+    const double z_midpoint = 0.5*(bead_count - 1)*z_step;
+    for (Vec3& position : backbone) position.z -= z_midpoint;
+    return backbone;
+}
+
+bool graft_candidate_allowed(
+    const std::vector<pdms_filler::Vec3>& positions,
+    const std::vector<bool>& placed,
+    int first,
+    int count,
+    const std::vector<std::vector<int>>& distances
+) {
+    for (int bead = first; bead < first + count; ++bead) {
+        for (int other = 0; other < static_cast<int>(positions.size());
+             ++other) {
+            if (other == bead) continue;
+            const bool current_side =
+                other >= first && other < first + count;
+            if (!placed[static_cast<std::size_t>(other)] && !current_side)
+                continue;
+            const int path = distances[static_cast<std::size_t>(bead)]
+                                      [static_cast<std::size_t>(other)];
+            if (path <= 2) continue;
+            const double minimum = path == 3 ? 4.0 : 4.5;
+            if (pdms_filler::norm2(
+                    positions[static_cast<std::size_t>(bead)] -
+                    positions[static_cast<std::size_t>(other)]) <
+                minimum*minimum)
+                return false;
+        }
+    }
+    return true;
+}
+
+std::vector<pdms_filler::Vec3> build_local_grafted(
+    const Settings& s,
+    const GraftedArchitecture& architecture,
+    const pdms_filler::Vec3& half_extent,
+    std::mt19937& random
+) {
+    using pdms_filler::Vec3;
+    const std::vector<std::vector<int>> adjacency =
+        graph_adjacency(s.n1, architecture.edges);
+    const std::vector<std::vector<int>> distances =
+        graph_distance_matrix(adjacency);
+    std::uniform_real_distribution<double> phase(0.0, 2.0*kPi);
+    int complete_candidates = 0;
+    int internally_allowed_candidates = 0;
+    int maximum_sides_built = 0;
+
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        std::vector<Vec3> positions(static_cast<std::size_t>(s.n1));
+        std::vector<bool> placed(static_cast<std::size_t>(s.n1), false);
+        const std::vector<Vec3> backbone =
+            compact_grafted_backbone(
+                s.graft_backbone_length, s.graft_spacing == 0 ? 14 : 16);
+        for (int bead = 0; bead < s.graft_backbone_length; ++bead) {
+            positions[static_cast<std::size_t>(bead)] =
+                backbone[static_cast<std::size_t>(bead)];
+            placed[static_cast<std::size_t>(bead)] = true;
+        }
+
+        bool built = true;
+        for (int side = 0; side < s.graft_side_chain_count && built; ++side) {
+            const int graft =
+                architecture.graft_sites[static_cast<std::size_t>(side)];
+            const Vec3 center = backbone[static_cast<std::size_t>(graft)];
+            const Vec3 direction = pdms_filler::normalized(
+                Vec3{center.x, center.y, 0.0});
+            const auto raw_basis = pdms_filler::perpendicular_basis(direction);
+            const int first = s.graft_backbone_length +
+                              side*s.graft_side_chain_length;
+            bool side_built = false;
+            for (int side_attempt = 0;
+                 side_attempt < 500 && !side_built; ++side_attempt) {
+                const double phi = phase(random);
+                const Vec3 first_basis =
+                    std::cos(phi)*raw_basis.first +
+                    std::sin(phi)*raw_basis.second;
+                const Vec3 second_basis =
+                    -std::sin(phi)*raw_basis.first +
+                    std::cos(phi)*raw_basis.second;
+                const bool dense = s.graft_spacing == 0;
+                const int straight_prefix = dense
+                    ? s.graft_side_chain_length : 1;
+                const double cone = 78.0*kPi/180.0;
+                const double turn = 45.0*kPi/180.0;
+                const double handedness = side_attempt % 2 == 0 ? 1.0 : -1.0;
+                Vec3 position = center;
+                for (int bead = 1; bead <= s.graft_side_chain_length; ++bead) {
+                    Vec3 step_direction = direction;
+                    if (bead > straight_prefix) {
+                        const double azimuth = handedness *
+                            (bead - straight_prefix - 1)*turn;
+                        step_direction =
+                            std::cos(cone)*direction +
+                            std::sin(cone)*
+                                (std::cos(azimuth)*first_basis +
+                                 std::sin(azimuth)*second_basis);
+                    }
+                    position = position +
+                               kBondLengthAngstrom*step_direction;
+                    positions[static_cast<std::size_t>(first + bead - 1)] =
+                        position;
+                }
+                side_built = graft_candidate_allowed(
+                    positions, placed, first, s.graft_side_chain_length,
+                    distances);
+            }
+            if (!side_built) {
+                built = false;
+                break;
+            }
+            for (int bead = first;
+                 bead < first + s.graft_side_chain_length; ++bead)
+                placed[static_cast<std::size_t>(bead)] = true;
+            maximum_sides_built = std::max(maximum_sides_built, side + 1);
+        }
+        if (!built) continue;
+        ++complete_candidates;
+        if (!internal_geometry_allowed(positions, adjacency)) continue;
+        ++internally_allowed_candidates;
+
+        Vec3 lower = positions.front();
+        Vec3 upper = positions.front();
+        for (const Vec3& position : positions) {
+            lower.x = std::min(lower.x, position.x);
+            lower.y = std::min(lower.y, position.y);
+            lower.z = std::min(lower.z, position.z);
+            upper.x = std::max(upper.x, position.x);
+            upper.y = std::max(upper.y, position.y);
+            upper.z = std::max(upper.z, position.z);
+        }
+        const Vec3 midpoint = 0.5*(lower + upper);
+        for (Vec3& position : positions) position = position - midpoint;
+        if (0.5*(upper.x - lower.x) > half_extent.x ||
+            0.5*(upper.y - lower.y) > half_extent.y ||
+            0.5*(upper.z - lower.z) > half_extent.z)
+            continue;
+        return positions;
+    }
+
+    std::ostringstream message;
+    message << "Could not build a compact, self-avoiding grafted conformation "
+            << "for the available placement cell (complete candidates: "
+            << complete_candidates << ", internally allowed: "
+            << internally_allowed_candidates << ", half extents: "
+            << half_extent.x << ", " << half_extent.y << ", "
+            << half_extent.z << " A, maximum side chains built: "
+            << maximum_sides_built
+            << "). Reduce molecule count or chain lengths, increase graft "
+               "spacing, or lower the initial density.";
+    throw std::runtime_error(message.str());
+}
+
+struct BranchedPlacementGrid {
     int nx = 1;
     int ny = 1;
     int nz = 1;
@@ -1083,7 +1413,7 @@ struct StarPlacementGrid {
     double z_lower = 0.0;
 };
 
-StarPlacementGrid star_placement_grid(
+BranchedPlacementGrid branched_placement_grid(
     const Settings& s,
     const Box& box,
     double z_lower,
@@ -1092,13 +1422,13 @@ StarPlacementGrid star_placement_grid(
     const double z_length = z_upper - z_lower;
     if (z_length <= kPlacementSpacing800KAngstrom)
         throw std::runtime_error(
-            "Insufficient z space to place star strands below crosslinkers");
+            "Insufficient z space to place branched strands below crosslinkers");
     const int base = std::max(
         1, static_cast<int>(std::ceil(std::cbrt(s.m1))));
     const int maximum = 4 * base;
     double best_score = -1.0;
     long long best_capacity = 0;
-    StarPlacementGrid best;
+    BranchedPlacementGrid best;
     for (int nx = 1; nx <= maximum; ++nx) {
         for (int ny = 1; ny <= maximum; ++ny) {
             const long long plane = 1LL*nx*ny;
@@ -1119,11 +1449,11 @@ StarPlacementGrid star_placement_grid(
         }
     }
     if (best_capacity < s.m1)
-        throw std::runtime_error("Could not construct a star placement grid");
+        throw std::runtime_error("Could not construct a branched-strand placement grid");
     return best;
 }
 
-double star_placement_upper_z(const Settings& s, const Box& box) {
+double branched_placement_upper_z(const Settings& s, const Box& box) {
     if (s.m2 == 0) return box.lz/2;
     const double span = std::max(0, s.n2 - 1) * kBondLengthAngstrom;
     const int nx = std::max(
@@ -1147,9 +1477,9 @@ void add_star_strands(
 ) {
     const StarArchitecture architecture = star_architecture(s);
     const double z_lower = -box.lz/2;
-    const double z_upper = star_placement_upper_z(s, box);
-    const StarPlacementGrid grid =
-        star_placement_grid(s, box, z_lower, z_upper);
+    const double z_upper = branched_placement_upper_z(s, box);
+    const BranchedPlacementGrid grid =
+        branched_placement_grid(s, box, z_lower, z_upper);
     const double spacing = kPlacementSpacing800KAngstrom;
     const pdms_filler::Vec3 half_extent{
         0.5*(grid.cell_x - spacing),
@@ -1187,6 +1517,56 @@ void add_star_strands(
         }
         add_graph_topology(
             sys, first_atom, s.n1, architecture.edges);
+    }
+}
+
+void add_grafted_strands(
+    System& sys,
+    const Settings& s,
+    const Box& box,
+    const std::set<int>& reactive_sites
+) {
+    const GraftedArchitecture architecture = grafted_architecture(s);
+    const double z_lower = -box.lz/2;
+    const double z_upper = branched_placement_upper_z(s, box);
+    const BranchedPlacementGrid grid =
+        branched_placement_grid(s, box, z_lower, z_upper);
+    const double spacing = kPlacementSpacing800KAngstrom;
+    const pdms_filler::Vec3 half_extent{
+        0.5*(grid.cell_x - spacing),
+        0.5*(grid.cell_y - spacing),
+        0.5*(grid.cell_z - spacing)
+    };
+    if (half_extent.x <= 0.0 || half_extent.y <= 0.0 ||
+        half_extent.z <= 0.0)
+        throw std::runtime_error(
+            "Grafted placement cells are smaller than the 7.5 A model spacing");
+    std::mt19937 random(s.seed);
+    const std::vector<pdms_filler::Vec3> local =
+        build_local_grafted(s, architecture, half_extent, random);
+
+    for (int molecule_index = 0; molecule_index < s.m1; ++molecule_index) {
+        const int ix = molecule_index % grid.nx;
+        const int iy = (molecule_index / grid.nx) % grid.ny;
+        const int iz = molecule_index / (grid.nx * grid.ny);
+        const pdms_filler::Vec3 translation{
+            -box.lx/2 + (ix + 0.5)*grid.cell_x,
+            -box.ly/2 + (iy + 0.5)*grid.cell_y,
+            grid.z_lower + (iz + 0.5)*grid.cell_z
+        };
+        const int molecule_id = static_cast<int>(
+            sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
+        const int first_atom = static_cast<int>(sys.atoms.size()) + 1;
+        for (int bead = 0; bead < s.n1; ++bead) {
+            const pdms_filler::Vec3 position =
+                local[static_cast<std::size_t>(bead)] + translation;
+            sys.atoms.push_back({
+                static_cast<int>(sys.atoms.size()) + 1, molecule_id,
+                reactive_sites.count(bead + 1) ? 2 : 1, 0.0,
+                position.x, position.y, position.z
+            });
+        }
+        add_graph_topology(sys, first_atom, s.n1, architecture.edges);
     }
 }
 
@@ -1341,6 +1721,8 @@ System build_system(const Settings& s, const Box& box) {
         add_ring_strands(sys, s, box, strand_reactive_sites);
     else if (s.strand_topology == "star")
         add_star_strands(sys, s, box, strand_reactive_sites);
+    else if (s.strand_topology == "grafted")
+        add_grafted_strands(sys, s, box, strand_reactive_sites);
     else
         add_linear_component(
             sys, s.n1, s.m1, 1, box, kBondLengthAngstrom,
@@ -1758,9 +2140,11 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"precedence\": \"defaults < config file < command line\",\n"
         << "    \"resolved\": {\n"
         << "      \"strand_topology\": \"" << s.strand_topology << "\",\n"
-        << "      \"strand_length\": "
-        << (s.strand_topology == "star" ? s.star_arm_length : s.n1)
-        << ",\n"
+        << "      \"strand_length\": ";
+    if (s.strand_topology == "star") out << s.star_arm_length;
+    else if (s.strand_topology == "grafted") out << "null";
+    else out << s.n1;
+    out << ",\n"
         << "      \"strand_beads_per_molecule\": " << s.n1 << ",\n"
         << "      \"strand_count\": " << s.m1 << ",\n"
         << "      \"strand_functionality\": " << s.strand_functionality << ",\n"
@@ -1775,6 +2159,36 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     else out << "null";
     out << ",\n      \"star_arm_length\": ";
     if (s.strand_topology == "star") out << s.star_arm_length;
+    else out << "null";
+    out << ",\n      \"grafted_label\": ";
+    if (s.strand_topology == "grafted")
+        out << '"' << grafted_architecture_label(s) << '"';
+    else out << "null";
+    out << ",\n      \"grafted_backbone_length\": ";
+    if (s.strand_topology == "grafted") out << s.graft_backbone_length;
+    else out << "null";
+    out << ",\n      \"grafted_side_chain_length\": ";
+    if (s.strand_topology == "grafted") out << s.graft_side_chain_length;
+    else out << "null";
+    out << ",\n      \"graft_spacing\": ";
+    if (s.strand_topology == "grafted") out << s.graft_spacing;
+    else out << "null";
+    out << ",\n      \"graft_interval\": ";
+    if (s.strand_topology == "grafted") out << s.graft_spacing + 1;
+    else out << "null";
+    out << ",\n      \"grafted_side_chain_count\": ";
+    if (s.strand_topology == "grafted") out << s.graft_side_chain_count;
+    else out << "null";
+    out << ",\n      \"graft_functional_fraction_requested_percent\": ";
+    if (s.strand_topology == "grafted")
+        out << s.graft_functional_fraction;
+    else out << "null";
+    out << ",\n      \"graft_functional_side_chain_count\": ";
+    if (s.strand_topology == "grafted") out << s.graft_functional_count;
+    else out << "null";
+    out << ",\n      \"graft_functional_fraction_realized_percent\": ";
+    if (s.strand_topology == "grafted")
+        out << 100.0*s.graft_functional_count/s.graft_side_chain_count;
     else out << "null";
     out << ",\n"
         << "      \"crosslinker_length\": " << s.n2 << ",\n"
@@ -1828,6 +2242,36 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     else out << "null";
     out << ",\n    \"star_arm_length\": ";
     if (s.strand_topology == "star") out << s.star_arm_length;
+    else out << "null";
+    out << ",\n    \"grafted_label\": ";
+    if (s.strand_topology == "grafted")
+        out << '"' << grafted_architecture_label(s) << '"';
+    else out << "null";
+    out << ",\n    \"grafted_backbone_length\": ";
+    if (s.strand_topology == "grafted") out << s.graft_backbone_length;
+    else out << "null";
+    out << ",\n    \"grafted_side_chain_length\": ";
+    if (s.strand_topology == "grafted") out << s.graft_side_chain_length;
+    else out << "null";
+    out << ",\n    \"graft_spacing\": ";
+    if (s.strand_topology == "grafted") out << s.graft_spacing;
+    else out << "null";
+    out << ",\n    \"graft_interval\": ";
+    if (s.strand_topology == "grafted") out << s.graft_spacing + 1;
+    else out << "null";
+    out << ",\n    \"side_chain_count\": ";
+    if (s.strand_topology == "grafted") out << s.graft_side_chain_count;
+    else out << "null";
+    out << ",\n    \"functional_fraction_requested_percent\": ";
+    if (s.strand_topology == "grafted")
+        out << s.graft_functional_fraction;
+    else out << "null";
+    out << ",\n    \"functional_side_chain_count\": ";
+    if (s.strand_topology == "grafted") out << s.graft_functional_count;
+    else out << "null";
+    out << ",\n    \"functional_fraction_realized_percent\": ";
+    if (s.strand_topology == "grafted")
+        out << 100.0*s.graft_functional_count/s.graft_side_chain_count;
     else out << "null";
     out << ",\n"
         << "    \"reactive_bead_sites\": [";
@@ -1924,6 +2368,8 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"strand_initial_shape\": \""
         << (s.strand_topology == "ring" ? "planar_regular_ring" :
             s.strand_topology == "star" ? "compact_branched_coil" :
+            s.strand_topology == "grafted" ?
+                "compact_helical_backbone_with_side_chains" :
                                            "straight_linear") << "\"\n"
         << "  },\n"
         << "  \"topology\": {\n"
@@ -1935,6 +2381,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "  \"random_seeds\": {\n"
         << "    \"strand_reactive_site_seed\": " << s.strand_reactive_seed << ",\n"
         << "    \"star_strand_conformation_seed\": " << s.seed << ",\n"
+        << "    \"grafted_strand_conformation_seed\": " << s.seed << ",\n"
         << "    \"crosslink_site_seed\": " << s.crosslink_seed << ",\n"
         << "    \"star_moderator_seed\": " << s.seed << ",\n"
         << "    \"pdms_filler_seed\": " << s.filler_seed << ",\n"

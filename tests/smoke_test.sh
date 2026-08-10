@@ -45,6 +45,15 @@ run_case star_6arm --strand-topology star --strand-length 4 \
 run_case star_8arm --strand-topology star --strand-length 4 \
     --strand-count 2 --strand-arm-count 8 --crosslinker-length 8 \
     --density 0.02 --output data.star_8arm
+run_case grafted_comb --strand-topology grafted --backbone-length 64 \
+    --side-chain-length 8 --graft-spacing 12 \
+    --graft-functional-fraction 40 --strand-count 4 \
+    --crosslinker-length 8 --density 0.02 --output data.grafted_comb
+run_case grafted_bottlebrush --strand-topology grafted --backbone-length 24 \
+    --side-chain-length 5 --graft-spacing 0 \
+    --graft-functional-fraction 25 --strand-count 2 \
+    --crosslinker-length 8 --density 0.01 \
+    --output data.grafted_bottlebrush
 
 base_dir="$test_root/base/PDMS_elastomer"
 full_dir="$test_root/full/PDMS_elastomer_filler_N8_5wt_film_Lz40"
@@ -56,6 +65,8 @@ star_3arm_dir="$test_root/star_3arm/star_3arm"
 star_4arm_dir="$test_root/star_4arm/star_4arm"
 star_6arm_dir="$test_root/star_6arm/star_6arm"
 star_8arm_dir="$test_root/star_8arm/star_8arm"
+grafted_comb_dir="$test_root/grafted_comb/grafted_comb"
+grafted_bottlebrush_dir="$test_root/grafted_bottlebrush/grafted_bottlebrush"
 
 test -f "$base_dir/data.PDMS_elastomer"
 test -f "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
@@ -67,6 +78,8 @@ test -f "$star_3arm_dir/data.star_3arm"
 test -f "$star_4arm_dir/data.star_4arm"
 test -f "$star_6arm_dir/data.star_6arm"
 test -f "$star_8arm_dir/data.star_8arm"
+test -f "$grafted_comb_dir/data.grafted_comb"
+test -f "$grafted_bottlebrush_dir/data.grafted_bottlebrush"
 
 check_data() {
     local data=$1
@@ -90,6 +103,8 @@ check_data "$star_3arm_dir/data.star_3arm"
 check_data "$star_4arm_dir/data.star_4arm"
 check_data "$star_6arm_dir/data.star_6arm"
 check_data "$star_8arm_dir/data.star_8arm"
+check_data "$grafted_comb_dir/data.grafted_comb"
+check_data "$grafted_bottlebrush_dir/data.grafted_bottlebrush"
 
 grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
 test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_Lz40")" -eq 4
@@ -193,6 +208,66 @@ check_star "$star_4arm_dir" star_4arm 4 1 17 4 4 4
 check_star "$star_6arm_dir" star_6arm 6 2 26 2 3 4
 check_star "$star_8arm_dir" star_8arm 8 3 35 2 4 4
 
+check_grafted() {
+    local directory=$1
+    local case_name=$2
+    local label=$3
+    local backbone=$4
+    local side_length=$5
+    local spacing=$6
+    local side_count=$7
+    local functionality=$8
+    local strand_beads=$9
+    local strand_count=${10}
+    local crosslinker_count=${11}
+    local data="$directory/data.$case_name"
+    local info="$directory/$case_name.info"
+
+    grep -q '"topology": "grafted"' "$info"
+    grep -q "\"grafted_label\": \"$label\"" "$info"
+    grep -q "\"grafted_backbone_length\": $backbone" "$info"
+    grep -q "\"grafted_side_chain_length\": $side_length" "$info"
+    grep -q "\"graft_spacing\": $spacing" "$info"
+    grep -q "\"side_chain_count\": $side_count" "$info"
+    grep -q "\"functional_side_chain_count\": $functionality" "$info"
+    grep -q '"reactive_distribution": "selected_side_chain_ends"' "$info"
+    grep -q "\"strands\": {\"component\": 1, \"N\": $strand_beads, \"M\": $strand_count" "$info"
+    grep -q "\"crosslinkers\": {\"component\": 2, \"N\": 8, \"M\": $crosslinker_count" "$info"
+
+    awk -v molecules="$strand_count" -v beads="$strand_beads" \
+        -v backbone="$backbone" -v side_length="$side_length" \
+        -v expected="$functionality" '
+        /^Atoms # full$/ { in_atoms = 1; next }
+        in_atoms && /^Bonds$/ { in_atoms = 0 }
+        in_atoms && NF == 7 && $2 <= molecules {
+            local = (($1 - 1) % beads) + 1
+            if (local <= backbone && $3 != 1) bad_backbone = 1
+            if ($3 == 2) {
+                ++reactive[$2]
+                if (local <= backbone || (local - backbone) % side_length != 0)
+                    bad_reactive = 1
+            }
+        }
+        END {
+            for (molecule = 1; molecule <= molecules; ++molecule)
+                if (reactive[molecule] != expected) exit 1
+            if (bad_backbone || bad_reactive) exit 1
+        }
+    ' "$data"
+
+    awk -v backbone="$backbone" -v expected="$side_count" '
+        /^Bonds$/ { in_bonds = 1; next }
+        in_bonds && /^[A-Za-z]/ { in_bonds = 0 }
+        in_bonds && NF == 4 && (($3 <= backbone && $4 > backbone) ||
+            ($4 <= backbone && $3 > backbone)) { ++attachments }
+        END { exit attachments != expected }
+    ' "$data"
+}
+
+check_grafted "$grafted_comb_dir" grafted_comb comb_like 64 8 12 5 2 104 4 2
+check_grafted "$grafted_bottlebrush_dir" grafted_bottlebrush \
+    dense_bottlebrush 24 5 0 24 6 144 2 3
+
 limit_dir="$test_root/limit"
 mkdir -p "$limit_dir"
 if (
@@ -228,6 +303,22 @@ if (
     exit 1
 fi
 grep -q 'Star arm count must be 3, 4, 6, or 8' "$invalid_star_dir/star.err"
+
+invalid_grafted_dir="$test_root/invalid_grafted"
+mkdir -p "$invalid_grafted_dir"
+for option_value in '--graft-spacing -1' \
+    '--graft-functional-fraction 0' \
+    '--graft-functional-fraction 101'; do
+    read -r option value <<< "$option_value"
+    if (
+        cd "$invalid_grafted_dir"
+        "$generator" --strand-topology grafted "$option" "$value" \
+            >/dev/null 2>grafted.err
+    ); then
+        echo "invalid grafted option unexpectedly succeeded: $option_value" >&2
+        exit 1
+    fi
+done
 
 fixed_geometry_dir="$test_root/fixed_geometry"
 mkdir -p "$fixed_geometry_dir"

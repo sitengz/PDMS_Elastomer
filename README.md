@@ -1,8 +1,9 @@
 # PDMS Elastomer
 
 This repository generates a coarse-grained PDMS elastomer model with a simple,
-component-based interface. Functional strands can be linear chains, rings, or
-star polymers. The base model also contains short functional PDMS
+component-based interface. Functional strands can be linear chains, rings,
+star polymers, or grafted-backbone polymers spanning comb-like and
+bottlebrush architectures. The base model also contains short functional PDMS
 crosslinkers. Five-bead star moderators and neutral PDMS filler chains are
 optional.
 
@@ -30,8 +31,10 @@ Molecule IDs are consecutive and grouped in this order:
 The default model uses 900 linear strands of 128 beads, with both chain ends
 functional. Ring strands can instead carry a configurable number of regular or
 randomly located functional sites. Star strands have functional outer arm ends
-and support 3, 4, 6, or 8 arms. Crosslinkers are 32-bead linear PDMS chains with
-four functional sites each. Moderators and filler are disabled by default.
+and support 3, 4, 6, or 8 arms. Grafted strands place side chains along a
+neutral-ended backbone and select a configurable fraction of side-chain ends
+as functional. Crosslinkers are 32-bead linear PDMS chains with four functional
+sites each. Moderators and filler are disabled by default.
 
 The 2.801 Å bond length and 7.5 Å initial intermolecular spacing are fixed by
 the PDMS model rather than treated as generator inputs. The spacing represents
@@ -129,6 +132,14 @@ future analysis.
     --strand-length 32 \
     --strand-arm-count 6 \
     --strand-count 600
+
+./bin/pdms_elastomer_generator \
+    --strand-topology grafted \
+    --backbone-length 64 \
+    --side-chain-length 8 \
+    --graft-spacing 12 \
+    --graft-functional-fraction 40 \
+    --strand-count 1200
 ```
 
 Each invocation creates a case-named directory containing:
@@ -147,9 +158,13 @@ separate lower and upper wall fixes.
 ```text
 --strand-length N
 --strand-count M
---strand-topology linear|ring|star
+--strand-topology linear|ring|star|grafted
 --strand-functionality F
 --strand-arm-count 3|4|6|8
+--backbone-length N
+--side-chain-length N
+--graft-spacing N
+--graft-functional-fraction X
 --strand-reactive-distribution regular|random
 --strand-reactive-seed N
 --crosslinker-length N
@@ -196,6 +211,29 @@ The multi-bead cores are linear. For the 6- and 8-arm architectures, every
 center bead has total bond coordination four. A complete star contains
 `center_beads + arm_count * strand_length` beads.
 
+For grafted strands, `--backbone-length` and `--side-chain-length` replace
+`--strand-length`. The unified `grafted` topology covers both comb-like and
+bottlebrush structures. `--graft-spacing S` is the number of ungrafted
+backbone beads between adjacent grafts, so the graft interval is `S + 1` and
+the number of side chains is
+
+```text
+ceil(backbone_length / (graft_spacing + 1))
+```
+
+Spacing 0 adds one side chain to every backbone bead and is labeled a dense
+bottlebrush. Positive spacing produces a comb-like structure; it is a
+continuous architectural control rather than a hard comb/bottlebrush boundary.
+The total strand size is
+`backbone_length + side_chain_count * side_chain_length`.
+
+`--graft-functional-fraction X` requests the percentage of side-chain ends
+that are functional. The generator rounds this to a whole number of side
+chains, selects those ends evenly along the graft sequence, and records both
+the requested and realized fractions in the `.info` file. At least one
+side-chain end is functional. Backbone ends are always neutral and are not
+included in stoichiometry.
+
 For regular crosslinkers, reactive sites are placed at beads 1, 3, 5, and so
 on. Random placement samples distinct sites reproducibly from
 `--crosslink-seed`. Filler chains are packed in the central 40% of the box
@@ -227,6 +265,8 @@ those sources have not been changed in this generator-only refactor.
 - `examples/05_star_4arm/`: four-arm, one-center star strands;
 - `examples/06_star_6arm/`: six-arm, two-center star strands;
 - `examples/07_star_8arm/`: eight-arm, three-center star strands;
+- `examples/08_grafted_comb/`: sparse, comb-like grafted strands;
+- `examples/09_grafted_bottlebrush/`: dense bottlebrush strands with a graft on every backbone bead;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: existing post-processing programs, currently unchanged;
 - `tests/smoke_test.sh`: generator build, metadata, stoichiometry, and component-order checks.
