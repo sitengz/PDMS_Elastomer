@@ -121,7 +121,9 @@ grep -q '"extra_moderator_functional_groups": 8' "$full_dir/PDMS_elastomer_fille
 grep -q '"requested": "2:1"' "$ratio_dir/PDMS_elastomer.info"
 grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 3' "$ratio_dir/PDMS_elastomer.info"
 grep -q '"expected_frames": 1001' "$base_dir/PDMS_elastomer.info"
-grep -q '"maximum_allowed_beads": 150000' "$base_dir/PDMS_elastomer.info"
+grep -q '"hard_maximum_beads": null' "$base_dir/PDMS_elastomer.info"
+grep -q '"recommended_maximum_beads": 150000' "$base_dir/PDMS_elastomer.info"
+grep -q '"exceeds_recommended_maximum": false' "$base_dir/PDMS_elastomer.info"
 grep -q '"config_file": ' "$config_dir/from_config.info"
 grep -q '"strands": {"component": 1, "N": 16, "M": 16' "$config_dir/from_config.info"
 grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 8' "$config_dir/from_config.info"
@@ -270,14 +272,19 @@ check_grafted "$grafted_bottlebrush_dir" grafted_bottlebrush \
 
 limit_dir="$test_root/limit"
 mkdir -p "$limit_dir"
-if (
+(
     cd "$limit_dir"
     "$generator" --strand-count 1100 >/dev/null 2>limit.err
-); then
-    echo "oversized model unexpectedly succeeded" >&2
-    exit 1
-fi
-grep -q 'maximum allowed is 150000' "$limit_dir/limit.err"
+)
+test -f "$limit_dir/PDMS_elastomer/data.PDMS_elastomer"
+grep -q 'warning: total beads exceed the recommended 150000-bead' \
+    "$limit_dir/limit.err"
+grep -q '"total_beads": 158400' \
+    "$limit_dir/PDMS_elastomer/PDMS_elastomer.info"
+grep -q '"hard_maximum_beads": null' \
+    "$limit_dir/PDMS_elastomer/PDMS_elastomer.info"
+grep -q '"exceeds_recommended_maximum": true' \
+    "$limit_dir/PDMS_elastomer/PDMS_elastomer.info"
 
 invalid_ring_dir="$test_root/invalid_ring"
 mkdir -p "$invalid_ring_dir"

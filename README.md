@@ -61,11 +61,12 @@ M_crosslinker = F_strand*M_strand/4 = 2*M_strand/4 = M_strand/2
 
 Therefore the default strand:crosslinker molecule ratio is `2:1`.
 
-## Model-size limit
+## Model-size guidance
 
-The complete generated model—including strands, crosslinkers, moderators, and
-filler—is limited to 150,000 beads. The generator reports an error instead of
-writing an oversized model.
+150,000 total beads is the recommended working size for balancing simulation
+cost against finite-size effects. It is not a hard generator limit. Larger
+models are generated normally, with a warning so the increased memory and
+runtime requirements are intentional.
 
 ## Text-file input
 
@@ -101,8 +102,8 @@ sweeps straightforward:
 ```
 
 The resulting `<case>.info` file records the resolved settings, config-file
-path, component counts, molecule-ID ranges, stoichiometry, and bead limit for
-future analysis.
+path, component counts, molecule-ID ranges, stoichiometry, and whether the
+model exceeds the recommended bead count for future analysis.
 
 ## Generate a model
 

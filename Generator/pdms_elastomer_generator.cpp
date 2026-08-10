@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <set>
 #include <sstream>
@@ -30,7 +31,7 @@ constexpr double kModeratorZLowerFraction = 0.28;
 constexpr double kModeratorZUpperFraction = 0.38;
 constexpr long long kMsdProductionSteps = 1000000;
 constexpr int kMsdDumpEverySteps = 1000;
-constexpr long long kMaximumTotalBeads = 150000;
+constexpr long long kRecommendedTotalBeads = 150000;
 constexpr long long kMsdExpectedFrames =
     kMsdProductionSteps / kMsdDumpEverySteps + 1;
 
@@ -441,9 +442,10 @@ void resolve_filler_composition(Settings& s) {
     const double fraction = s.filler_weight_percent / 100.0;
     const double desired_filler_mass = base_mass * fraction / (1.0 - fraction);
     const double requested_chains = desired_filler_mass / filler_chain_mass(s);
-    if (requested_chains > static_cast<double>(kMaximumTotalBeads))
+    if (!std::isfinite(requested_chains) ||
+        requested_chains > std::numeric_limits<int>::max())
         throw std::runtime_error(
-            "Requested filler would exceed the 150000-bead model limit");
+            "Requested filler chain count is too large to represent");
     s.m4 = std::max(
         1, static_cast<int>(std::lround(requested_chains)));
 
@@ -522,6 +524,11 @@ void report_composition(const Settings& s) {
     }
     std::cerr << "  total beads=" << total_beads
               << ", total mass=" << total_mass << " g/mol-equivalent\n";
+    if (total_beads > kRecommendedTotalBeads)
+        std::cerr << "  warning: total beads exceed the recommended "
+                  << kRecommendedTotalBeads
+                  << "-bead balance between simulation cost and size effects; "
+                     "generation will continue\n";
     if (s.m3 > 0)
         std::cerr << "  moderator functional groups=" << 4LL*s.m3
                   << " (extra; excluded from stoichiometry)\n";
@@ -593,12 +600,6 @@ void validate(const Settings& s) {
     const long long total_beads =
         1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + 1LL*s.n3*s.m3 + filler_beads(s);
     if (total_beads <= 0) throw std::runtime_error("The model must contain at least one bead");
-    if (total_beads > kMaximumTotalBeads) {
-        std::ostringstream message;
-        message << "Model contains " << total_beads
-                << " beads; the maximum allowed is " << kMaximumTotalBeads;
-        throw std::runtime_error(message.str());
-    }
     if (s.output.empty()) throw std::runtime_error("Output filename cannot be empty");
 }
 
@@ -1709,8 +1710,6 @@ System build_system(const Settings& s, const Box& box) {
     System sys;
     const long long expected_atoms =
         1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + 1LL*s.n3*s.m3 + filler_beads(s);
-    if (expected_atoms > kMaximumTotalBeads)
-        throw std::runtime_error("Requested system exceeds the 150000-bead limit");
     sys.atoms.reserve(static_cast<size_t>(expected_atoms));
     const std::set<int> strand_reactive_sites = strand_sites(s);
     std::cerr << "Strand type-2 sites (" << s.strand_topology << ", "
@@ -2289,7 +2288,12 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "  },\n"
         << "  \"composition\": {\n"
         << "    \"total_beads\": " << total_beads << ",\n"
-        << "    \"maximum_allowed_beads\": " << kMaximumTotalBeads << ",\n"
+        << "    \"hard_maximum_beads\": null,\n"
+        << "    \"recommended_maximum_beads\": "
+        << kRecommendedTotalBeads << ",\n"
+        << "    \"exceeds_recommended_maximum\": "
+        << (total_beads > kRecommendedTotalBeads ? "true" : "false")
+        << ",\n"
         << "    \"total_mass_g_per_mol_equivalent\": " << total_mass << ",\n"
         << "    \"total_molecules\": " << total_molecules << ",\n"
         << "    \"requested_filler_weight_percent\": ";
