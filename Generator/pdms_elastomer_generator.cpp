@@ -20,6 +20,8 @@
 namespace {
 
 constexpr double kAvogadroScale = 0.602; // Converts (g/mol)/(g/cm^3) to A^3.
+constexpr double kBondLengthAngstrom = pdms_filler::kBondLength;
+constexpr double kPlacementSpacing800KAngstrom = 7.5;
 constexpr double kFillerZLowerFraction = -0.20;
 constexpr double kFillerZUpperFraction = 0.20;
 constexpr double kModeratorZLowerFraction = 0.28;
@@ -44,8 +46,6 @@ struct Settings {
     double bead_mass = 74.0;
     double density = 0.1;
     double target_density = 0.8;
-    double bond_length = 2.801;
-    double spacing = 7.0;
     double thickness = -1.0; // Negative selects the original cubic bulk box.
     std::uint32_t seed = 5489u;
     std::string output = "data.PDMS_elastomer";
@@ -138,8 +138,6 @@ void apply_option(Settings& s, const std::string& option,
     else if (option == "--density") s.density = parse_double(value, option);
     else if (option == "--target-density")
         s.target_density = parse_double(value, option);
-    else if (option == "--bond-length") s.bond_length = parse_double(value, option);
-    else if (option == "--spacing") s.spacing = parse_double(value, option);
     else if (option == "--thickness") s.thickness = parse_double(value, option);
     else if (option == "--seed")
         s.seed = static_cast<std::uint32_t>(parse_int(value, option));
@@ -221,8 +219,6 @@ void print_help(const char* program) {
         << "  --mass X          bead mass in g/mol (default: 74)\n"
         << "  --density X       initial packing density in g/cm^3 (default: 0.1)\n"
         << "  --target-density X density after scripted compression (default: 0.8)\n"
-        << "  --bond-length X   initial bond length in angstrom (default: 2.801)\n"
-        << "  --spacing X       spacing between placed molecules (default: 7.0)\n"
         << "  --thickness X     fixed film thickness Lz in angstrom; omit for bulk\n"
         << "  --seed N          reproducible random seed (default: 5489)\n"
         << "  --output FILE     override the automatically generated data filename\n"
@@ -402,9 +398,8 @@ void validate(const Settings& s) {
         throw std::runtime_error("--crosslink-distribution must be regular or random");
     if (s.crosslink_distribution == "regular" && s.crosslinker_functionality > (s.n2 + 1) / 2)
         throw std::runtime_error("Regular placement at 1,3,5,... requires functionality <= ceil(N2/2)");
-    if (s.bead_mass <= 0 || s.density <= 0 || s.target_density <= 0 ||
-        s.bond_length <= 0 || s.spacing <= 0)
-        throw std::runtime_error("Mass, densities, bond length, and spacing must be positive");
+    if (s.bead_mass <= 0 || s.density <= 0 || s.target_density <= 0)
+        throw std::runtime_error("Mass and densities must be positive");
     if (s.thickness == 0.0)
         throw std::runtime_error("--thickness must be positive; omit it for the cubic bulk system");
     const long long total_beads =
@@ -466,7 +461,8 @@ void add_linear_component(System& sys, int bead_count, int molecule_count, int c
     if (capacity < molecule_count) {
         std::ostringstream msg;
         msg << "Placement grid capacity (" << capacity << ") is smaller than M" << component
-            << " (" << molecule_count << "). Reduce spacing or molecule length.";
+            << " (" << molecule_count
+            << "). Reduce molecule count or length, or lower the initial density.";
         throw std::runtime_error(msg.str());
     }
 
@@ -518,7 +514,7 @@ bool overlaps_existing(const std::vector<pdms_filler::Vec3>& candidate,
 
 void add_star_moderators(System& sys, const Settings& s, const Box& box,
                          std::mt19937& rng) {
-    const double margin = s.bond_length;
+    const double margin = kBondLengthAngstrom;
     if (box.lx <= 2.0*margin || box.ly <= 2.0*margin)
         throw std::runtime_error("Lateral box dimensions are too small for a star moderator");
     std::uniform_real_distribution<double> xdist(-box.lx/2 + margin, box.lx/2 - margin);
@@ -533,7 +529,7 @@ void add_star_moderators(System& sys, const Settings& s, const Box& box,
             const double x = xdist(rng);
             const double y = ydist(rng);
             const double z = zdist(rng);
-            const double b = s.bond_length;
+            const double b = kBondLengthAngstrom;
             candidate = {
                 {x,     y,     z},
                 {x + b, y,     z},
@@ -638,13 +634,15 @@ System build_system(const Settings& s, const Box& box) {
         throw std::runtime_error("Requested system exceeds the 150000-bead limit");
     sys.atoms.reserve(static_cast<size_t>(expected_atoms));
     add_linear_component(
-        sys, s.n1, s.m1, 1, box, s.bond_length, s.spacing);
+        sys, s.n1, s.m1, 1, box, kBondLengthAngstrom,
+        kPlacementSpacing800KAngstrom);
     const std::set<int> reactive_sites = crosslinker_sites(s);
     std::cerr << "Cross-linker type-3 sites (" << s.crosslink_distribution << "):";
     for (int site : reactive_sites) std::cerr << ' ' << site;
     std::cerr << '\n';
-    add_linear_component(sys, s.n2, s.m2, 2, box, s.bond_length, s.spacing,
-                         reactive_sites);
+    add_linear_component(
+        sys, s.n2, s.m2, 2, box, kBondLengthAngstrom,
+        kPlacementSpacing800KAngstrom, reactive_sites);
     std::mt19937 rng(s.seed);
     add_star_moderators(sys, s, box, rng);
     add_pdms_filler(sys, s, box);
@@ -823,7 +821,7 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << "mass            1 " << s.bead_mass << "\n"
         << "mass            2 " << s.bead_mass << "\n"
         << "mass            3 " << s.bead_mass << "\n\n"
-        << "bond_coeff      1 115.4086 2.801\n"
+        << "bond_coeff      1 115.4086 " << kBondLengthAngstrom << "\n"
         << "bond_coeff      2 115.4086 7.235\n"
         << "angle_coeff     1 64.62431 111.623\n"
         << "dihedral_coeff  1 4 3.280141429 -0.59019769 1.991530534 3.31026047\n\n"
@@ -898,7 +896,7 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << " etotal epair ebond eangle edihed\n\n"
         << "write_data      data." << suffix << ".xlink_800 nocoeff\n\n"
         << "# Restore the reacted-bond equilibrium length and 300 K pair interaction\n"
-        << "bond_coeff      2 115.4086 2.801\n"
+        << "bond_coeff      2 115.4086 " << kBondLengthAngstrom << "\n"
         << "pair_style      lj/gromacs 12 15\n";
     pdms_filler::write_pair_matrix(out, 300.0, false);
     out << "\n";
@@ -1148,8 +1146,10 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"box_angstrom\": {\"Lx\": " << box.lx << ", \"Ly\": " << box.ly
         << ", \"Lz\": " << box.lz << "},\n"
         << "    \"volume_angstrom3\": " << volume << ",\n"
-        << "    \"bond_length_angstrom\": " << s.bond_length << ",\n"
-        << "    \"placement_spacing_angstrom\": " << s.spacing << ",\n"
+        << "    \"bond_length_angstrom\": " << kBondLengthAngstrom << ",\n"
+        << "    \"placement_spacing_800K_angstrom\": "
+        << kPlacementSpacing800KAngstrom << ",\n"
+        << "    \"geometry_parameters_source\": \"fixed by the PDMS model\",\n"
         << "    \"intercomponent_minimum_separation_angstrom\": "
         << s.filler_minimum_separation << ",\n"
         << "    \"component_z_placement\": {\n"

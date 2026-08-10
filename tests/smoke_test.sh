@@ -17,13 +17,13 @@ run_case() {
 }
 
 run_case base --strand-length 16 --strand-count 12 \
-    --crosslinker-length 16 --spacing 3
+    --crosslinker-length 16
 run_case full --filler-wt 5 --filler-length 8 \
     --strand-length 24 --strand-count 12 --crosslinker-length 16 \
-    --moderator-count 2 --spacing 3 \
+    --moderator-count 2 \
     --thickness 40
 run_case ratio --strand-length 16 --strand-count 12 \
-    --crosslinker-length 16 --stoichiometry 2:1 --spacing 3
+    --crosslinker-length 16 --stoichiometry 2:1
 run_case config --config "$repo_root/tests/basic_model.conf" --strand-count 16
 
 base_dir="$test_root/base/PDMS_elastomer"
@@ -83,6 +83,19 @@ if (
     exit 1
 fi
 grep -q 'maximum allowed is 150000' "$limit_dir/limit.err"
+
+fixed_geometry_dir="$test_root/fixed_geometry"
+mkdir -p "$fixed_geometry_dir"
+for removed_option in --bond-length --spacing; do
+    if (
+        cd "$fixed_geometry_dir"
+        "$generator" "$removed_option" 3 >/dev/null 2>option.err
+    ); then
+        echo "$removed_option unexpectedly remained configurable" >&2
+        exit 1
+    fi
+    grep -q "Unknown option: $removed_option" "$fixed_geometry_dir/option.err"
+done
 
 awk '
     /^Atoms # full$/ { in_atoms = 1; next }

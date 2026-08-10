@@ -30,6 +30,10 @@ The default model uses 900 linear strands of 128 beads, with both chain ends
 functional. Crosslinkers are 32-bead linear PDMS chains with four functional
 sites each. Moderators and filler are disabled by default.
 
+The 2.801 Å bond length and 7.5 Å initial intermolecular spacing are fixed by
+the PDMS model rather than treated as generator inputs. The spacing represents
+the approximate minimum-energy separation at 800 K.
+
 ## Stoichiometry
 
 `--stoichiometry A:B` specifies the ratio
@@ -68,7 +72,6 @@ crosslinker_length = 32
 functionality = 4
 stoichiometry = 1:1
 moderator_count = 0
-spacing = 7.0
 output = data.PDMS_elastomer
 ```
 
@@ -141,8 +144,6 @@ separate lower and upper wall fixes.
 --mass X
 --density X
 --target-density X
---bond-length X
---spacing X
 --thickness X
 --seed N
 --output FILE
@@ -177,3 +178,18 @@ those sources have not been changed in this generator-only refactor.
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: existing post-processing programs, currently unchanged;
 - `tests/smoke_test.sh`: generator build, metadata, stoichiometry, and component-order checks.
+
+## References
+
+1. D. Zhang et al., “Energy renormalization for temperature transferable
+   coarse-graining of silicone polymer,” *Physical Chemistry Chemical Physics*
+   **26**, 4541–4554 (2024).
+   [https://doi.org/10.1039/d3cp05969c](https://doi.org/10.1039/d3cp05969c)
+2. M. Safaripour et al., “Predicting ice adhesion of fluid-containing
+   elastomers from surface tension/energy and crosslink density,” *Materials &
+   Design* **268**, 116498 (2026).
+   [https://doi.org/10.1016/j.matdes.2026.116498](https://doi.org/10.1016/j.matdes.2026.116498)
+3. A. P. Thompson et al., “LAMMPS - a flexible simulation tool for
+   particle-based materials modeling at the atomic, meso, and continuum
+   scales,” *Computer Physics Communications* **271**, 108171 (2022).
+   [https://doi.org/10.1016/j.cpc.2021.108171](https://doi.org/10.1016/j.cpc.2021.108171)

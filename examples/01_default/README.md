@@ -9,6 +9,7 @@ This example reproduces the generator's current default model:
 - `1:1` strand-end-to-crosslinker functional-group stoichiometry;
 - no moderators;
 - no filler;
+- model-fixed 2.801 Å bonds and 7.5 Å initial spacing at 800 K;
 - 129,600 beads in total.
 
 From the repository root, run:
