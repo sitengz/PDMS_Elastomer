@@ -25,16 +25,28 @@ run_case full --filler-wt 5 --filler-length 8 \
 run_case ratio --strand-length 16 --strand-count 12 \
     --crosslinker-length 16 --stoichiometry 2:1
 run_case config --config "$repo_root/tests/basic_model.conf" --strand-count 16
+run_case ring_bifunctional --strand-topology ring \
+    --strand-length 16 --strand-count 12 --strand-functionality 2 \
+    --strand-reactive-distribution regular --crosslinker-length 16 \
+    --output data.ring_bifunctional
+run_case ring_tetrafunctional --strand-topology ring \
+    --strand-length 16 --strand-count 12 --strand-functionality 4 \
+    --strand-reactive-distribution random --strand-reactive-seed 12345 \
+    --crosslinker-length 16 --output data.ring_tetrafunctional
 
 base_dir="$test_root/base/PDMS_elastomer"
 full_dir="$test_root/full/PDMS_elastomer_filler_N8_5wt_film_Lz40"
 ratio_dir="$test_root/ratio/PDMS_elastomer"
 config_dir="$test_root/config/from_config"
+ring_bifunctional_dir="$test_root/ring_bifunctional/ring_bifunctional"
+ring_tetrafunctional_dir="$test_root/ring_tetrafunctional/ring_tetrafunctional"
 
 test -f "$base_dir/data.PDMS_elastomer"
 test -f "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
 test -f "$ratio_dir/data.PDMS_elastomer"
 test -f "$config_dir/data.from_config"
+test -f "$ring_bifunctional_dir/data.ring_bifunctional"
+test -f "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
 
 check_data() {
     local data=$1
@@ -52,6 +64,8 @@ check_data "$base_dir/data.PDMS_elastomer"
 check_data "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
 check_data "$ratio_dir/data.PDMS_elastomer"
 check_data "$config_dir/data.from_config"
+check_data "$ring_bifunctional_dir/data.ring_bifunctional"
+check_data "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
 
 grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
 test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_Lz40")" -eq 4
@@ -72,6 +86,35 @@ grep -q '"maximum_allowed_beads": 150000' "$base_dir/PDMS_elastomer.info"
 grep -q '"config_file": ' "$config_dir/from_config.info"
 grep -q '"strands": {"component": 1, "N": 16, "M": 16' "$config_dir/from_config.info"
 grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 8' "$config_dir/from_config.info"
+grep -q '"topology": "ring"' "$ring_bifunctional_dir/ring_bifunctional.info"
+grep -q '"functionality": 2' "$ring_bifunctional_dir/ring_bifunctional.info"
+grep -q '"reactive_distribution": "regular"' "$ring_bifunctional_dir/ring_bifunctional.info"
+grep -q '"reactive_bead_sites": \[1, 9\]' "$ring_bifunctional_dir/ring_bifunctional.info"
+grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 6' "$ring_bifunctional_dir/ring_bifunctional.info"
+grep -q '^282 bonds$' "$ring_bifunctional_dir/data.ring_bifunctional"
+grep -q '"topology": "ring"' "$ring_tetrafunctional_dir/ring_tetrafunctional.info"
+grep -q '"functionality": 4' "$ring_tetrafunctional_dir/ring_tetrafunctional.info"
+grep -q '"reactive_distribution": "random"' "$ring_tetrafunctional_dir/ring_tetrafunctional.info"
+grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 12' "$ring_tetrafunctional_dir/ring_tetrafunctional.info"
+grep -q '^372 bonds$' "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
+
+awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { in_atoms = 0 }
+    in_atoms && NF == 7 && $2 <= 12 && $3 == 2 { ++sites[$2] }
+    END {
+        for (molecule = 1; molecule <= 12; ++molecule)
+            if (sites[molecule] != 4) exit 1
+    }
+' "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
+
+awk '
+    /^Bonds$/ { in_bonds = 1; next }
+    in_bonds && NF == 4 && (($3 == 16 && $4 == 1) || ($3 == 1 && $4 == 16)) {
+        closure = 1
+    }
+    END { exit !closure }
+' "$ring_bifunctional_dir/data.ring_bifunctional"
 
 limit_dir="$test_root/limit"
 mkdir -p "$limit_dir"
@@ -83,6 +126,19 @@ if (
     exit 1
 fi
 grep -q 'maximum allowed is 150000' "$limit_dir/limit.err"
+
+invalid_ring_dir="$test_root/invalid_ring"
+mkdir -p "$invalid_ring_dir"
+if (
+    cd "$invalid_ring_dir"
+    "$generator" --strand-topology ring --strand-length 15 \
+        --strand-functionality 2 --strand-reactive-distribution regular \
+        >/dev/null 2>ring.err
+); then
+    echo "invalid regular ring unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -q 'divisible by functionality' "$invalid_ring_dir/ring.err"
 
 fixed_geometry_dir="$test_root/fixed_geometry"
 mkdir -p "$fixed_geometry_dir"

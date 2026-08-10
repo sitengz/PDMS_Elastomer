@@ -20,6 +20,7 @@
 namespace {
 
 constexpr double kAvogadroScale = 0.602; // Converts (g/mol)/(g/cm^3) to A^3.
+constexpr double kPi = 3.14159265358979323846;
 constexpr double kBondLengthAngstrom = pdms_filler::kBondLength;
 constexpr double kPlacementSpacing800KAngstrom = 7.5;
 constexpr double kFillerZLowerFraction = -0.20;
@@ -38,6 +39,10 @@ struct Settings {
     int n3 = 5,   m3 = 0;   // Optional five-bead star-like moderators.
     int n4 = 0,   m4 = 0;   // Optional neutral PDMS filler chains.
     int crosslinker_functionality = 4;
+    std::string strand_topology = "linear";
+    int strand_functionality = 2;
+    std::string strand_reactive_distribution = "regular";
+    std::uint32_t strand_reactive_seed = 20260810u;
     int stoichiometry_strand_groups = 1;
     int stoichiometry_crosslinker_groups = 1;
     std::string crosslink_distribution = "random";
@@ -113,6 +118,14 @@ void apply_option(Settings& s, const std::string& option,
                   const std::string& value) {
     if      (option == "--strand-length") s.n1 = parse_int(value, option);
     else if (option == "--strand-count") s.m1 = parse_int(value, option);
+    else if (option == "--strand-topology") s.strand_topology = value;
+    else if (option == "--strand-functionality")
+        s.strand_functionality = parse_int(value, option);
+    else if (option == "--strand-reactive-distribution")
+        s.strand_reactive_distribution = value;
+    else if (option == "--strand-reactive-seed")
+        s.strand_reactive_seed =
+            static_cast<std::uint32_t>(parse_int(value, option));
     else if (option == "--crosslinker-length") s.n2 = parse_int(value, option);
     else if (option == "--stoichiometry") parse_stoichiometry(value, s);
     else if (option == "--moderator-count") s.m3 = parse_int(value, option);
@@ -194,15 +207,20 @@ void print_help(const char* program) {
         << "Usage: " << program << " [options]\n\n"
         << "Generic coarse-grained PDMS elastomer generator.\n\n"
         << "Components are written in this molecule-ID order:\n"
-        << "  1. linear bifunctional strands\n"
+        << "  1. linear or ring strands\n"
         << "  2. functional short-chain crosslinkers\n"
         << "  3. optional five-bead star moderators\n"
         << "  4. optional neutral PDMS filler chains\n\n"
         << "  --strand-length N       beads per strand (default: 128)\n"
         << "  --strand-count M        number of strands (default: 900)\n"
+        << "  --strand-topology TYPE  linear or ring (default: linear)\n"
+        << "  --strand-functionality F reactive sites per strand; linear requires 2\n"
+        << "  --strand-reactive-distribution MODE\n"
+        << "                          ring sites: regular or random (default: regular)\n"
+        << "  --strand-reactive-seed N random ring-site seed (default: 20260810)\n"
         << "  --crosslinker-length N  beads per crosslinker (default: 32)\n"
         << "  --functionality F       reactive sites per crosslinker (default: 4)\n"
-        << "  --stoichiometry A:B     strand ends : crosslinker functional groups\n"
+        << "  --stoichiometry A:B     strand-group : crosslinker-group ratio\n"
         << "                          (default: 1:1; gives strand:crosslinker M = 2:1)\n"
         << "  --moderator-count M     optional five-bead star moderators (default: 0)\n"
         << "  --config FILE           read key = value settings; CLI values override file\n"
@@ -315,7 +333,8 @@ void resolve_filler_composition(Settings& s) {
 void apply_crosslinker_stoichiometry(Settings& s) {
     if (s.crosslinker_functionality < 3)
         throw std::runtime_error("Cross-linker functionality must be at least 3 to form a network");
-    const long long strand_side_groups = 2LL * s.m1;
+    const long long strand_side_groups =
+        1LL * s.strand_functionality * s.m1;
     const long long scaled_crosslinker_groups =
         strand_side_groups * s.stoichiometry_crosslinker_groups;
     const long long denominator =
@@ -323,7 +342,7 @@ void apply_crosslinker_stoichiometry(Settings& s) {
     if (scaled_crosslinker_groups % denominator != 0) {
         std::ostringstream message;
         message << "Exact stoichiometry is impossible: " << strand_side_groups
-                << " strand-end groups at " << s.stoichiometry_strand_groups
+                << " strand functional groups at " << s.stoichiometry_strand_groups
                 << ':' << s.stoichiometry_crosslinker_groups
                 << " cannot be represented by whole crosslinkers with functionality "
                 << s.crosslinker_functionality;
@@ -390,6 +409,29 @@ void validate(const Settings& s) {
         throw std::runtime_error("N and M values cannot be negative");
     if (s.n1 <= 0 || s.m1 <= 0)
         throw std::runtime_error("Strand length and strand count must be positive");
+    if (s.strand_topology != "linear" && s.strand_topology != "ring")
+        throw std::runtime_error("--strand-topology must be linear or ring");
+    if (s.strand_functionality < 2 || s.strand_functionality > s.n1)
+        throw std::runtime_error(
+            "Strand functionality must be between 2 and the strand length");
+    if (s.strand_reactive_distribution != "regular" &&
+        s.strand_reactive_distribution != "random")
+        throw std::runtime_error(
+            "--strand-reactive-distribution must be regular or random");
+    if (s.strand_topology == "linear" && s.strand_functionality != 2)
+        throw std::runtime_error(
+            "Linear strands are bifunctional; use --strand-functionality 2");
+    if (s.strand_topology == "linear" &&
+        s.strand_reactive_distribution != "regular")
+        throw std::runtime_error(
+            "Random strand reactive sites require --strand-topology ring");
+    if (s.strand_topology == "ring" && s.n1 < 4)
+        throw std::runtime_error("Ring strands require at least 4 beads");
+    if (s.strand_topology == "ring" &&
+        s.strand_reactive_distribution == "regular" &&
+        s.n1 % s.strand_functionality != 0)
+        throw std::runtime_error(
+            "Regular ring reactive sites require strand length divisible by functionality");
     if (s.n3 != 5 && s.m3 != 0)
         throw std::runtime_error("The implemented moderator is a five-bead star");
     if (s.crosslinker_functionality < 3 || s.crosslinker_functionality > 16 || s.crosslinker_functionality > s.n2)
@@ -428,6 +470,18 @@ std::set<int> random_sites(int bead_count, int functionality, std::uint32_t seed
     return std::set<int>(candidates.begin(), candidates.begin() + functionality);
 }
 
+std::set<int> strand_sites(const Settings& s) {
+    if (s.strand_topology == "linear") return {1, s.n1};
+    if (s.strand_reactive_distribution == "random")
+        return random_sites(s.n1, s.strand_functionality,
+                            s.strand_reactive_seed);
+    std::set<int> sites;
+    const int interval = s.n1 / s.strand_functionality;
+    for (int i = 0; i < s.strand_functionality; ++i)
+        sites.insert(1 + i * interval);
+    return sites;
+}
+
 std::set<int> crosslinker_sites(const Settings& s) {
     if (s.crosslink_distribution == "regular")
         return regular_sites(s.crosslinker_functionality);
@@ -441,6 +495,21 @@ void add_linear_topology(System& sys, int first_atom, int bead_count) {
         sys.angles.push_back({static_cast<int>(sys.angles.size()) + 1, 1, first_atom + i, first_atom + i + 1, first_atom + i + 2});
     for (int i = 0; i + 3 < bead_count; ++i)
         sys.dihedrals.push_back({static_cast<int>(sys.dihedrals.size()) + 1, 1, first_atom + i, first_atom + i + 1, first_atom + i + 2, first_atom + i + 3});
+}
+
+void add_ring_topology(System& sys, int first_atom, int bead_count) {
+    const auto atom = [first_atom, bead_count](int offset) {
+        return first_atom + (offset % bead_count);
+    };
+    for (int i = 0; i < bead_count; ++i)
+        sys.bonds.push_back({static_cast<int>(sys.bonds.size()) + 1, 1,
+                             atom(i), atom(i + 1)});
+    for (int i = 0; i < bead_count; ++i)
+        sys.angles.push_back({static_cast<int>(sys.angles.size()) + 1, 1,
+                              atom(i), atom(i + 1), atom(i + 2)});
+    for (int i = 0; i < bead_count; ++i)
+        sys.dihedrals.push_back({static_cast<int>(sys.dihedrals.size()) + 1, 1,
+                                 atom(i), atom(i + 1), atom(i + 2), atom(i + 3)});
 }
 
 void add_linear_component(System& sys, int bead_count, int molecule_count, int component,
@@ -482,12 +551,67 @@ void add_linear_component(System& sys, int bead_count, int molecule_count, int c
         const int first_atom = static_cast<int>(sys.atoms.size()) + 1;
         for (int bead = 1; bead <= bead_count; ++bead) {
             int atom_type = 1;
-            if (component == 1 && (bead == 1 || bead == bead_count)) atom_type = 2;
+            if (component == 1 && reactive_sites.count(bead)) atom_type = 2;
             if (component == 2 && reactive_sites.count(bead)) atom_type = 3;
             sys.atoms.push_back({static_cast<int>(sys.atoms.size()) + 1, molecule_id, atom_type, 0.0, x, y, z});
             x += reverse ? -bond_length : bond_length;
         }
         add_linear_topology(sys, first_atom, bead_count);
+    }
+}
+
+void add_ring_strands(System& sys, const Settings& s, const Box& box,
+                      const std::set<int>& reactive_sites) {
+    const double radius =
+        kBondLengthAngstrom / (2.0 * std::sin(kPi / s.n1));
+    const double diameter = 2.0 * radius;
+    const double spacing = kPlacementSpacing800KAngstrom;
+    if (box.lx < diameter + 2.0*spacing ||
+        box.ly < diameter + 2.0*spacing || box.lz < 2.0*spacing)
+        throw std::runtime_error(
+            "Simulation box is too small for the requested ring strands");
+
+    const int nx = static_cast<int>(
+        std::floor((box.lx - 2.0*spacing - diameter) /
+                   (diameter + spacing))) + 1;
+    const int ny = static_cast<int>(
+        std::floor((box.ly - 2.0*spacing - diameter) /
+                   (diameter + spacing))) + 1;
+    const int nz = static_cast<int>(
+        std::floor((box.lz - 2.0*spacing) / spacing)) + 1;
+    const long long capacity = 1LL * nx * ny * nz;
+    if (capacity < s.m1) {
+        std::ostringstream message;
+        message << "Ring placement capacity (" << capacity
+                << ") is smaller than the strand count (" << s.m1
+                << "). Reduce strand count or length, or lower initial density.";
+        throw std::runtime_error(message.str());
+    }
+
+    for (int molecule_index = 0; molecule_index < s.m1; ++molecule_index) {
+        const int ix = molecule_index % nx;
+        const int iy = (molecule_index / nx) % ny;
+        const int iz = molecule_index / (nx * ny);
+        const double cx = -box.lx/2 + spacing + radius +
+                          ix * (diameter + spacing);
+        const double cy = -box.ly/2 + spacing + radius +
+                          iy * (diameter + spacing);
+        const double cz = -box.lz/2 + spacing + iz * spacing;
+        const double phase = (molecule_index % 2) * kPi / s.n1;
+        const int molecule_id = static_cast<int>(
+            sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
+        const int first_atom = static_cast<int>(sys.atoms.size()) + 1;
+        for (int bead = 1; bead <= s.n1; ++bead) {
+            const double theta =
+                2.0 * kPi * (bead - 1) / s.n1 + phase;
+            const int atom_type = reactive_sites.count(bead) ? 2 : 1;
+            sys.atoms.push_back({
+                static_cast<int>(sys.atoms.size()) + 1, molecule_id,
+                atom_type, 0.0, cx + radius*std::cos(theta),
+                cy + radius*std::sin(theta), cz
+            });
+        }
+        add_ring_topology(sys, first_atom, s.n1);
     }
 }
 
@@ -633,9 +757,18 @@ System build_system(const Settings& s, const Box& box) {
     if (expected_atoms > kMaximumTotalBeads)
         throw std::runtime_error("Requested system exceeds the 150000-bead limit");
     sys.atoms.reserve(static_cast<size_t>(expected_atoms));
-    add_linear_component(
-        sys, s.n1, s.m1, 1, box, kBondLengthAngstrom,
-        kPlacementSpacing800KAngstrom);
+    const std::set<int> strand_reactive_sites = strand_sites(s);
+    std::cerr << "Strand type-2 sites (" << s.strand_topology << ", "
+              << (s.strand_topology == "ring"
+                      ? s.strand_reactive_distribution : "ends") << "):";
+    for (int site : strand_reactive_sites) std::cerr << ' ' << site;
+    std::cerr << '\n';
+    if (s.strand_topology == "ring")
+        add_ring_strands(sys, s, box, strand_reactive_sites);
+    else
+        add_linear_component(
+            sys, s.n1, s.m1, 1, box, kBondLengthAngstrom,
+            kPlacementSpacing800KAngstrom, strand_reactive_sites);
     const std::set<int> reactive_sites = crosslinker_sites(s);
     std::cerr << "Cross-linker type-3 sites (" << s.crosslink_distribution << "):";
     for (int site : reactive_sites) std::cerr << ' ' << site;
@@ -1016,6 +1149,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     const LjParameters hot = lj_parameters(800.0);
     const LjParameters cold = lj_parameters(300.0);
     const std::set<int> sites = crosslinker_sites(s);
+    const std::set<int> strand_reactive_sites = strand_sites(s);
 
     out << std::fixed << std::setprecision(8)
         << "{\n"
@@ -1046,8 +1180,13 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     out << ",\n"
         << "    \"precedence\": \"defaults < config file < command line\",\n"
         << "    \"resolved\": {\n"
+        << "      \"strand_topology\": \"" << s.strand_topology << "\",\n"
         << "      \"strand_length\": " << s.n1 << ",\n"
         << "      \"strand_count\": " << s.m1 << ",\n"
+        << "      \"strand_functionality\": " << s.strand_functionality << ",\n"
+        << "      \"strand_reactive_distribution\": \""
+        << (s.strand_topology == "ring"
+                ? s.strand_reactive_distribution : "ends") << "\",\n"
         << "      \"crosslinker_length\": " << s.n2 << ",\n"
         << "      \"crosslinker_count\": " << s.m2 << ",\n"
         << "      \"crosslinker_functionality\": " << s.crosslinker_functionality << ",\n"
@@ -1084,6 +1223,27 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         first_molecule += m[i];
     }
     out << "  },\n"
+        << "  \"strand\": {\n"
+        << "    \"topology\": \"" << s.strand_topology << "\",\n"
+        << "    \"functionality\": " << s.strand_functionality << ",\n"
+        << "    \"reactive_distribution\": \""
+        << (s.strand_topology == "ring"
+                ? s.strand_reactive_distribution : "ends") << "\",\n"
+        << "    \"reactive_bead_sites\": [";
+    bool first_strand_site = true;
+    for (int site : strand_reactive_sites) {
+        if (!first_strand_site) out << ", ";
+        out << site;
+        first_strand_site = false;
+    }
+    out << "],\n"
+        << "    \"bonds_per_molecule\": "
+        << (s.strand_topology == "ring" ? s.n1 : s.n1 - 1) << ",\n"
+        << "    \"angles_per_molecule\": "
+        << (s.strand_topology == "ring" ? s.n1 : std::max(0, s.n1 - 2)) << ",\n"
+        << "    \"dihedrals_per_molecule\": "
+        << (s.strand_topology == "ring" ? s.n1 : std::max(0, s.n1 - 3)) << "\n"
+        << "  },\n"
         << "  \"composition\": {\n"
         << "    \"total_beads\": " << total_beads << ",\n"
         << "    \"maximum_allowed_beads\": " << kMaximumTotalBeads << ",\n"
@@ -1127,14 +1287,16 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         first = false;
     }
     out << "],\n"
-        << "    \"type2_sites_total_including_moderators\": " << 2LL*s.m1 + 4LL*s.m3 << ",\n"
+        << "    \"type2_sites_total_including_moderators\": "
+        << 1LL*s.strand_functionality*s.m1 + 4LL*s.m3 << ",\n"
         << "    \"type3_sites_total\": " << 1LL*s.m2*s.crosslinker_functionality << "\n"
         << "  },\n"
         << "  \"stoichiometry\": {\n"
-        << "    \"definition\": \"strand-end functional groups : crosslinker functional groups\",\n"
+        << "    \"definition\": \"strand functional groups : crosslinker functional groups\",\n"
         << "    \"requested\": \"" << s.stoichiometry_strand_groups << ':'
         << s.stoichiometry_crosslinker_groups << "\",\n"
-        << "    \"strand_end_functional_groups\": " << 2LL*s.m1 << ",\n"
+        << "    \"strand_functional_groups\": "
+        << 1LL*s.strand_functionality*s.m1 << ",\n"
         << "    \"crosslinker_functional_groups\": "
         << 1LL*s.m2*s.crosslinker_functionality << ",\n"
         << "    \"moderators_included\": false,\n"
@@ -1160,7 +1322,9 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "      \"moderator_fraction_of_Lz\": ["
         << kModeratorZLowerFraction << ", " << kModeratorZUpperFraction << "]\n"
         << "    },\n"
-        << "    \"strand_initial_shape\": \"straight_linear\"\n"
+        << "    \"strand_initial_shape\": \""
+        << (s.strand_topology == "ring" ? "planar_regular_ring"
+                                         : "straight_linear") << "\"\n"
         << "  },\n"
         << "  \"topology\": {\n"
         << "    \"atoms\": " << sys.atoms.size() << ",\n"
@@ -1169,6 +1333,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"dihedrals\": " << sys.dihedrals.size() << "\n"
         << "  },\n"
         << "  \"random_seeds\": {\n"
+        << "    \"strand_reactive_site_seed\": " << s.strand_reactive_seed << ",\n"
         << "    \"crosslink_site_seed\": " << s.crosslink_seed << ",\n"
         << "    \"star_moderator_seed\": " << s.seed << ",\n"
         << "    \"pdms_filler_seed\": " << s.filler_seed << ",\n"

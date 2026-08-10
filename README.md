@@ -1,9 +1,9 @@
 # PDMS Elastomer
 
 This repository generates a coarse-grained PDMS elastomer model with a simple,
-component-based interface. The base model contains linear functional strands
-and short functional PDMS crosslinkers. Five-bead star moderators and neutral
-PDMS filler chains are optional.
+component-based interface. Functional strands can be linear chains or rings.
+The base model also contains short functional PDMS crosslinkers. Five-bead star
+moderators and neutral PDMS filler chains are optional.
 
 ## Build
 
@@ -27,8 +27,9 @@ Molecule IDs are consecutive and grouped in this order:
 4. filler.
 
 The default model uses 900 linear strands of 128 beads, with both chain ends
-functional. Crosslinkers are 32-bead linear PDMS chains with four functional
-sites each. Moderators and filler are disabled by default.
+functional. Ring strands can instead carry a configurable number of regular or
+randomly located functional sites. Crosslinkers are 32-bead linear PDMS chains
+with four functional sites each. Moderators and filler are disabled by default.
 
 The 2.801 Å bond length and 7.5 Å initial intermolecular spacing are fixed by
 the PDMS model rather than treated as generator inputs. The spacing represents
@@ -39,10 +40,10 @@ the approximate minimum-energy separation at 800 K.
 `--stoichiometry A:B` specifies the ratio
 
 ```text
-strand-end functional groups : crosslinker functional groups
+strand functional groups : crosslinker functional groups
 ```
 
-Only the two functional ends per strand enter this calculation. Moderator
+The strand contribution is `strand_functionality * strand_count`. Moderator
 functional groups are extra and do not change the derived crosslinker count.
 The generator requires an exact whole-molecule crosslinker result.
 
@@ -50,7 +51,7 @@ At the default `1:1` ratio, with four-functional crosslinkers and no
 moderators:
 
 ```text
-M_crosslinker = 2*M_strand/4 = M_strand/2
+M_crosslinker = F_strand*M_strand/4 = 2*M_strand/4 = M_strand/2
 ```
 
 Therefore the default strand:crosslinker molecule ratio is `2:1`.
@@ -68,6 +69,8 @@ Settings can also be stored in a reusable text file using `key = value` lines:
 ```text
 strand_length = 128
 strand_count = 900
+strand_topology = linear
+strand_functionality = 2
 crosslinker_length = 32
 functionality = 4
 stoichiometry = 1:1
@@ -112,6 +115,12 @@ future analysis.
     --moderator-count 6 \
     --filler-length 32 \
     --filler-wt 10
+
+./bin/pdms_elastomer_generator \
+    --strand-topology ring \
+    --strand-functionality 4 \
+    --strand-reactive-distribution random \
+    --strand-reactive-seed 20260810
 ```
 
 Each invocation creates a case-named directory containing:
@@ -130,6 +139,10 @@ separate lower and upper wall fixes.
 ```text
 --strand-length N
 --strand-count M
+--strand-topology linear|ring
+--strand-functionality F
+--strand-reactive-distribution regular|random
+--strand-reactive-seed N
 --crosslinker-length N
 --functionality F
 --stoichiometry A:B
@@ -149,6 +162,13 @@ separate lower and upper wall fixes.
 --output FILE
 --help
 ```
+
+Linear strands retain two functional ends. Ring strands use cyclic bonds,
+angles, and dihedrals, and their functionality is set with
+`--strand-functionality`. The `regular` distribution spaces ring reactive sites
+uniformly, which requires the ring length to be divisible by its functionality.
+The `random` distribution samples distinct ring sites reproducibly from
+`--strand-reactive-seed`.
 
 For regular crosslinkers, reactive sites are placed at beads 1, 3, 5, and so
 on. Random placement samples distinct sites reproducibly from
@@ -175,6 +195,8 @@ those sources have not been changed in this generator-only refactor.
 
 - `Generator/pdms_elastomer_generator.cpp`: generic model generator;
 - `examples/01_default/`: reproducible current-default sample;
+- `examples/02_ring_bifunctional/`: ring strands with two regular reactive sites;
+- `examples/03_ring_tetrafunctional/`: ring strands with four random reactive sites;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: existing post-processing programs, currently unchanged;
 - `tests/smoke_test.sh`: generator build, metadata, stoichiometry, and component-order checks.
