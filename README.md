@@ -1,9 +1,9 @@
 # PDMS Elastomer
 
-This repository generates coarse-grained PDMS elastomer models with an optional
-neutral PDMS-chain filler. It combines the V22 and V35 formulations in one
-generator and includes the standard post-processing tools used with the
-generated `.info` metadata.
+This repository generates a coarse-grained PDMS elastomer model with a simple,
+component-based interface. The base model contains linear functional strands
+and short functional PDMS crosslinkers. Five-bead star moderators and neutral
+PDMS filler chains are optional.
 
 ## Build
 
@@ -11,74 +11,131 @@ generated `.info` metadata.
 make
 ```
 
-The executables are written to `bin/`. A direct generator build is also
-possible:
+Executables are written to `bin/`. To build only the generator:
 
 ```bash
-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic \
-    Generator/pdms_elastomer_generator.cpp -o pdms_elastomer_generator
+make bin/pdms_elastomer_generator
 ```
+
+## Components and molecule IDs
+
+Molecule IDs are consecutive and grouped in this order:
+
+1. strands;
+2. crosslinkers;
+3. moderators;
+4. filler.
+
+The default model uses 900 linear strands of 128 beads, with both chain ends
+functional. Crosslinkers are 32-bead linear PDMS chains with four functional
+sites each. Moderators and filler are disabled by default.
+
+## Stoichiometry
+
+`--stoichiometry A:B` specifies the ratio
+
+```text
+strand-end functional groups : crosslinker functional groups
+```
+
+Only the two functional ends per strand enter this calculation. Moderator
+functional groups are extra and do not change the derived crosslinker count.
+The generator requires an exact whole-molecule crosslinker result.
+
+At the default `1:1` ratio, with four-functional crosslinkers and no
+moderators:
+
+```text
+M_crosslinker = 2*M_strand/4 = M_strand/2
+```
+
+Therefore the default strand:crosslinker molecule ratio is `2:1`.
+
+## Model-size limit
+
+The complete generated model—including strands, crosslinkers, moderators, and
+filler—is limited to 150,000 beads. The generator reports an error instead of
+writing an oversized model.
+
+## Text-file input
+
+Settings can also be stored in a reusable text file using `key = value` lines:
+
+```text
+strand_length = 128
+strand_count = 900
+crosslinker_length = 32
+functionality = 4
+stoichiometry = 1:1
+moderator_count = 0
+spacing = 7.0
+output = data.PDMS_elastomer
+```
+
+Lines beginning with `#` are comments. Keys may use underscores or hyphens.
+Run the generator with:
+
+```bash
+./bin/pdms_elastomer_generator --config Generator/example_model.conf
+```
+
+Command-line values override values from the file, which makes parameter
+sweeps straightforward:
+
+```bash
+./bin/pdms_elastomer_generator \
+    --config Generator/example_model.conf \
+    --strand-count 800 \
+    --output data.strands_800
+```
+
+The resulting `<case>.info` file records the resolved settings, config-file
+path, component counts, molecule-ID ranges, stoichiometry, and bead limit for
+future analysis.
 
 ## Generate a model
 
-V22 is the default formulation and no filler is added unless both filler
-arguments are supplied:
-
 ```bash
 ./bin/pdms_elastomer_generator
-./bin/pdms_elastomer_generator --formulation V35
-./bin/pdms_elastomer_generator --formulation V22 \
-    --filler-length 32 --filler-wt 10
-./bin/pdms_elastomer_generator --formulation V35 \
-    --filler-length 32 --filler-wt 5 --thickness 238.3
+
+./bin/pdms_elastomer_generator \
+    --strand-length 96 \
+    --strand-count 600 \
+    --crosslinker-length 24 \
+    --functionality 4 \
+    --stoichiometry 1:1
+
+./bin/pdms_elastomer_generator \
+    --moderator-count 6 \
+    --filler-length 32 \
+    --filler-wt 10
 ```
 
-Each invocation creates a case-named subdirectory containing four files:
+Each invocation creates a case-named directory containing:
 
-- `data.<case>`: initial LAMMPS data file
-- `in.<case>`: equilibration, crosslinking, and MSD-production input
-- `submit.<case>.sh`: one-node, 96-task Slurm script
-- `<case>.info`: JSON metadata used by the analyzers
+- `data.<case>`: initial LAMMPS data file;
+- `in.<case>`: equilibration, crosslinking, and MSD-production input;
+- `submit.<case>.sh`: one-node, 96-task Slurm script;
+- `<case>.info`: version-3 JSON model metadata.
 
 Omitting `--thickness` produces a cubic, fully periodic bulk system. Supplying
-it fixes `Lz` at the requested film thickness, keeps `Lx = Ly`, uses a
-nonperiodic z direction, and writes separate lower and upper wall fixes.
-
-## Formulation defaults
-
-| Setting | V22 | V35 |
-|---|---:|---:|
-| Network-strand length `N1` | 128 | 384 |
-| Network-strand count `M1` | 900 | 306 |
-| Crosslinker length `N2` | 32 | 32 |
-| Crosslinker functionality | 8 | 4 |
-| Reactive-site distribution | random | random |
-| Network initial shape | straight | folded | 
-| Bond-creation probability | 0.1 | 0.5 |
-| Moderator `N4`, `M4` | 5, 6 | 5, 6 |
-
-The crosslinker count is always stoichiometric:
-
-```text
-M2 = 2*M1/functionality
-```
-
-Functionality must be from 3 through 16 and must divide `2*M1` exactly. All
-initial covalent bonds are type 1. Bond type 2 is reserved for bonds created by
-LAMMPS during crosslinking.
+it fixes `Lz`, keeps `Lx = Ly`, uses a nonperiodic z direction, and writes
+separate lower and upper wall fixes.
 
 ## Generator options
 
 ```text
---formulation V22|V35
---n1 N --m1 M
---n2 N
---n4 N --m4 M
+--strand-length N
+--strand-count M
+--crosslinker-length N
+--functionality F
+--stoichiometry A:B
+--moderator-count M
+--config FILE
 --filler-length N
 --filler-wt X
 --filler-seed N
 --filler-min-separation X
---functionality F
 --crosslink-distribution random|regular
 --crosslink-seed N
 --mass X
@@ -92,38 +149,31 @@ LAMMPS during crosslinking.
 --help
 ```
 
-For regular crosslinkers, reactive sites are placed at 1, 3, 5, and so on.
-Random placement samples distinct sites reproducibly from `--crosslink-seed`.
-The neutral PDMS filler is component 3 and is initially packed in the central
-40% of the box while avoiding the network, crosslinkers, moderators, other
-filler chains, and the box boundaries.
+For regular crosslinkers, reactive sites are placed at beads 1, 3, 5, and so
+on. Random placement samples distinct sites reproducibly from
+`--crosslink-seed`. Filler chains are packed in the central 40% of the box
+while avoiding the other components and box boundaries.
 
 ## Simulation template
 
-The generated input first relaxes the low-density model at 800 K with a
-repulsive Lennard-Jones cutoff at the potential minimum. Compression and
-crosslinking then proceed together, followed by cooling and final equilibration
-at 300 K. The final stage is an independent 1,000,000-step 300 K NVT run with
-1,001 expected trajectory frames (`x y z ix iy iz`) for MSD analysis.
+The generated LAMMPS input relaxes the low-density model at 800 K, compresses
+and crosslinks it, cools it to 300 K, performs final equilibration, and writes
+an independent 1,000,000-step NVT trajectory for MSD analysis.
 
-The generated files are templates for the Iowa State Nova environment. Review
-the module names, partition, memory, wall time, and email before submitting on a
+The generated Slurm file is a template for the Iowa State Nova environment.
+Review its modules, partition, memory, wall time, and email before use on a
 different cluster.
 
 ## Analysis
 
-See [Analysis/README.md](Analysis/README.md) for the z-density profile, final
-snapshot/network report, filler/all-system MSD, and binary elastomer–filler
-morphology workflows.
+The current generator writes generic version-3 metadata and the new component
+order. Migration of the programs under `Analysis/` is intentionally deferred;
+those sources have not been changed in this generator-only refactor.
 
 ## Repository layout
 
-- `Generator/pdms_elastomer_generator.cpp`: unified V22/V35 command-line tool
-- `Generator/pdms_filler_component.hpp`: boundary-safe neutral PDMS filler builder
-- `Analysis/z_profile.cpp`: overlapping-window density and composition profiles
-- `Analysis/final_snapshot_analyzer.cpp`: conversion, topology, and end-to-end report
-- `Analysis/msd_analyzer.cpp`: bead or molecular-COM MSD and diffusion fitting
-- `Analysis/binary_morphology_analyzer.cpp`: local composition, structure factor,
-  and filler-chain contact graph
-- `Analysis/plot_binary_field_3d.m`: MATLAB visualization of the final binary field
-- `tests/smoke_test.sh`: compile and output-namespace regression checks
+- `Generator/pdms_elastomer_generator.cpp`: generic model generator;
+- `Generator/example_model.conf`: reusable text-input example;
+- `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
+- `Analysis/`: existing post-processing programs, currently unchanged;
+- `tests/smoke_test.sh`: generator build, metadata, stoichiometry, and component-order checks.

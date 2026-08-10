@@ -26,21 +26,20 @@ constexpr double kModeratorZLowerFraction = 0.28;
 constexpr double kModeratorZUpperFraction = 0.38;
 constexpr long long kMsdProductionSteps = 1000000;
 constexpr int kMsdDumpEverySteps = 1000;
+constexpr long long kMaximumTotalBeads = 150000;
 constexpr long long kMsdExpectedFrames =
     kMsdProductionSteps / kMsdDumpEverySteps + 1;
 
-enum class Formulation { V22, V35 };
-
 struct Settings {
-    Formulation formulation = Formulation::V22;
     int n1 = 128, m1 = 900;
     int n2 = 32,  m2 = 0;   // M2 is resolved from stoichiometry.
-    int n3 = 0,   m3 = 0;   // PDMS filler repeat units and chains.
-    int n4 = 5,   m4 = 6;   // Five-bead star-like moderators.
-    int crosslinker_functionality = 8;
+    int n3 = 5,   m3 = 0;   // Optional five-bead star-like moderators.
+    int n4 = 0,   m4 = 0;   // Optional neutral PDMS filler chains.
+    int crosslinker_functionality = 4;
+    int stoichiometry_strand_groups = 1;
+    int stoichiometry_crosslinker_groups = 1;
     std::string crosslink_distribution = "random";
     std::uint32_t crosslink_seed = 20260722u;
-    bool folded_network = false;
     double crosslink_probability = 0.1;
     double bead_mass = 74.0;
     double density = 0.1;
@@ -49,13 +48,14 @@ struct Settings {
     double spacing = 7.0;
     double thickness = -1.0; // Negative selects the original cubic bulk box.
     std::uint32_t seed = 5489u;
-    std::string output = "data.V22_no_filler";
+    std::string output = "data.PDMS_elastomer";
     bool output_explicit = false;
     bool filler_length_explicit = false;
     bool filler_weight_explicit = false;
     double filler_weight_percent = -1.0;
     std::uint32_t filler_seed = 20260727u;
     double filler_minimum_separation = 4.5;
+    std::string config_file;
 };
 
 struct Atom { int id, molecule, type; double charge, x, y, z; };
@@ -81,63 +81,140 @@ double parse_double(const std::string& value, const std::string& option) {
     catch (...) { throw std::runtime_error("Invalid number for " + option + ": " + value); }
 }
 
-const char* formulation_name(const Settings& settings) {
-    return settings.formulation == Formulation::V22 ? "V22" : "V35";
+void parse_stoichiometry(const std::string& value, Settings& settings) {
+    const std::size_t separator = value.find(':');
+    if (separator == std::string::npos || value.find(':', separator + 1) != std::string::npos)
+        throw std::runtime_error(
+            "--stoichiometry must use STRAND:CROSSLINKER form, for example 1:1");
+    settings.stoichiometry_strand_groups =
+        parse_int(value.substr(0, separator), "--stoichiometry");
+    settings.stoichiometry_crosslinker_groups =
+        parse_int(value.substr(separator + 1), "--stoichiometry");
+    if (settings.stoichiometry_strand_groups <= 0 ||
+        settings.stoichiometry_crosslinker_groups <= 0)
+        throw std::runtime_error("--stoichiometry values must be positive integers");
 }
 
-Formulation parse_formulation(const std::string& value) {
-    if (value == "V22" || value == "v22") return Formulation::V22;
-    if (value == "V35" || value == "v35") return Formulation::V35;
-    throw std::runtime_error("--formulation must be V22 or V35");
+std::string trim(std::string value) {
+    const std::size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const std::size_t last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
 }
 
-Formulation requested_formulation(int argc, char** argv) {
-    Formulation result = Formulation::V22;
-    bool found = false;
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) != "--formulation") continue;
-        if (found)
-            throw std::runtime_error("--formulation may be supplied only once");
-        if (i + 1 >= argc)
-            throw std::runtime_error("Missing value after --formulation");
-        result = parse_formulation(argv[i + 1]);
-        found = true;
-        ++i;
+std::string option_name(std::string key) {
+    key = trim(key);
+    if (key.rfind("--", 0) == 0) key.erase(0, 2);
+    std::replace(key.begin(), key.end(), '_', '-');
+    return "--" + key;
+}
+
+void apply_option(Settings& s, const std::string& option,
+                  const std::string& value) {
+    if      (option == "--strand-length") s.n1 = parse_int(value, option);
+    else if (option == "--strand-count") s.m1 = parse_int(value, option);
+    else if (option == "--crosslinker-length") s.n2 = parse_int(value, option);
+    else if (option == "--stoichiometry") parse_stoichiometry(value, s);
+    else if (option == "--moderator-count") s.m3 = parse_int(value, option);
+    else if (option == "--filler-length") {
+        s.n4 = parse_int(value, option);
+        s.filler_length_explicit = true;
     }
-    return result;
+    else if (option == "--filler-wt") {
+        s.filler_weight_percent = parse_double(value, option);
+        s.filler_weight_explicit = true;
+    }
+    else if (option == "--filler-seed")
+        s.filler_seed = static_cast<std::uint32_t>(parse_int(value, option));
+    else if (option == "--filler-min-separation")
+        s.filler_minimum_separation = parse_double(value, option);
+    else if (option == "--functionality")
+        s.crosslinker_functionality = parse_int(value, option);
+    else if (option == "--crosslink-distribution")
+        s.crosslink_distribution = value;
+    else if (option == "--crosslink-seed")
+        s.crosslink_seed = static_cast<std::uint32_t>(parse_int(value, option));
+    else if (option == "--mass") s.bead_mass = parse_double(value, option);
+    else if (option == "--density") s.density = parse_double(value, option);
+    else if (option == "--target-density")
+        s.target_density = parse_double(value, option);
+    else if (option == "--bond-length") s.bond_length = parse_double(value, option);
+    else if (option == "--spacing") s.spacing = parse_double(value, option);
+    else if (option == "--thickness") s.thickness = parse_double(value, option);
+    else if (option == "--seed")
+        s.seed = static_cast<std::uint32_t>(parse_int(value, option));
+    else if (option == "--output") {
+        s.output = value;
+        s.output_explicit = true;
+    }
+    else throw std::runtime_error("Unknown option: " + option);
 }
 
-Settings formulation_defaults(Formulation formulation) {
-    Settings settings;
-    settings.formulation = formulation;
-    if (formulation == Formulation::V35) {
-        settings.n1 = 384;
-        settings.m1 = 306;
-        settings.crosslinker_functionality = 4;
-        settings.folded_network = true;
-        settings.crosslink_probability = 0.5;
-        settings.output = "data.V35_no_filler";
+void read_config_file(Settings& settings, const std::string& path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("Cannot open config file: " + path);
+    settings.config_file = path;
+
+    std::string line;
+    int line_number = 0;
+    while (std::getline(input, line)) {
+        ++line_number;
+        const std::size_t comment = line.find('#');
+        if (comment != std::string::npos) line.erase(comment);
+        line = trim(line);
+        if (line.empty()) continue;
+
+        const std::size_t separator = line.find('=');
+        if (separator == std::string::npos)
+            throw std::runtime_error(
+                "Config line " + std::to_string(line_number) +
+                " must use key = value syntax");
+        const std::string key = option_name(line.substr(0, separator));
+        std::string value = trim(line.substr(separator + 1));
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\'')))
+            value = value.substr(1, value.size() - 2);
+        if (value.empty())
+            throw std::runtime_error(
+                "Config line " + std::to_string(line_number) +
+                " has an empty value");
+        try {
+            apply_option(settings, key, value);
+        } catch (const std::exception& error) {
+            throw std::runtime_error(
+                "Config line " + std::to_string(line_number) + ": " +
+                error.what());
+        }
     }
-    return settings;
+    if (!input.good() && !input.eof())
+        throw std::runtime_error("Failed while reading config file: " + path);
 }
 
 void print_help(const char* program) {
     std::cout
         << "Usage: " << program << " [options]\n\n"
-        << "PDMS-only V22/V35 elastomer formulation generator.\n"
-        << "V22 is the default formulation, and the default contains no filler.\n\n"
-        << "  --formulation NAME  V22 or V35 (default: V22)\n"
-        << "  --n1 N --m1 M    bifunctional network strands\n"
-        << "  --n2 N           cross-linker length (default: 32); M2 is stoichiometric\n"
-        << "  --n4 N --m4 M    star-moderator size/count (N4 must be 5; defaults: 5, 6)\n"
-        << "\nOptional component-3 PDMS filler:\n"
+        << "Generic coarse-grained PDMS elastomer generator.\n\n"
+        << "Components are written in this molecule-ID order:\n"
+        << "  1. linear bifunctional strands\n"
+        << "  2. functional short-chain crosslinkers\n"
+        << "  3. optional five-bead star moderators\n"
+        << "  4. optional neutral PDMS filler chains\n\n"
+        << "  --strand-length N       beads per strand (default: 128)\n"
+        << "  --strand-count M        number of strands (default: 900)\n"
+        << "  --crosslinker-length N  beads per crosslinker (default: 32)\n"
+        << "  --functionality F       reactive sites per crosslinker (default: 4)\n"
+        << "  --stoichiometry A:B     strand ends : crosslinker functional groups\n"
+        << "                          (default: 1:1; gives strand:crosslinker M = 2:1)\n"
+        << "  --moderator-count M     optional five-bead star moderators (default: 0)\n"
+        << "  --config FILE           read key = value settings; CLI values override file\n"
+        << "\nOptional component-4 PDMS filler:\n"
         << "  --filler-length N repeat units per filler chain\n"
-        << "  --filler-wt X     filler weight percent of complete formulation\n"
+        << "  --filler-wt X     filler weight percent of the complete model\n"
         << "  --filler-seed N   filler conformation/packing seed (default: 20260727)\n"
         << "  --filler-min-separation X  minimum filler/moderator-to-other distance in A"
            " (default: 4.5)\n"
         << "\nNetwork and box controls:\n"
-        << "  --functionality F cross-linker reactive sites, 3-16\n"
         << "  --crosslink-distribution MODE\n"
         << "                     reactive-site placement: regular or random (default: random)\n"
         << "  --crosslink-seed N random-site seed (default: 20260722)\n"
@@ -154,47 +231,30 @@ void print_help(const char* program) {
 }
 
 Settings parse_args(int argc, char** argv) {
-    Settings s = formulation_defaults(requested_formulation(argc, argv));
+    Settings s;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--help") {
+            print_help(argv[0]);
+            std::exit(0);
+        }
+    }
+
+    bool have_config = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) != "--config") continue;
+        if (have_config)
+            throw std::runtime_error("--config may be supplied only once");
+        if (i + 1 >= argc)
+            throw std::runtime_error("Missing value after --config");
+        read_config_file(s, argv[++i]);
+        have_config = true;
+    }
+
     for (int i = 1; i < argc; ++i) {
         const std::string option = argv[i];
-        if (option == "--help") { print_help(argv[0]); std::exit(0); }
         if (i + 1 >= argc) throw std::runtime_error("Missing value after " + option);
         const std::string value = argv[++i];
-        if      (option == "--formulation") { /* Resolved in the first pass. */ }
-        else if (option == "--n1") s.n1 = parse_int(value, option);
-        else if (option == "--m1") s.m1 = parse_int(value, option);
-        else if (option == "--n2") s.n2 = parse_int(value, option);
-        else if (option == "--m2")
-            throw std::runtime_error("M2 is determined by M2=2*M1/functionality; do not supply --m2");
-        else if (option == "--n3" || option == "--m3")
-            throw std::runtime_error(
-                option + " is derived; use --filler-length and --filler-wt");
-        else if (option == "--n4") s.n4 = parse_int(value, option);
-        else if (option == "--m4") s.m4 = parse_int(value, option);
-        else if (option == "--filler-length") {
-            s.n3 = parse_int(value, option);
-            s.filler_length_explicit = true;
-        }
-        else if (option == "--filler-wt") {
-            s.filler_weight_percent = parse_double(value, option);
-            s.filler_weight_explicit = true;
-        }
-        else if (option == "--filler-seed")
-            s.filler_seed = static_cast<std::uint32_t>(parse_int(value, option));
-        else if (option == "--filler-min-separation")
-            s.filler_minimum_separation = parse_double(value, option);
-        else if (option == "--functionality") s.crosslinker_functionality = parse_int(value, option);
-        else if (option == "--crosslink-distribution") s.crosslink_distribution = value;
-        else if (option == "--crosslink-seed") s.crosslink_seed = static_cast<std::uint32_t>(parse_int(value, option));
-        else if (option == "--mass") s.bead_mass = parse_double(value, option);
-        else if (option == "--density") s.density = parse_double(value, option);
-        else if (option == "--target-density") s.target_density = parse_double(value, option);
-        else if (option == "--bond-length") s.bond_length = parse_double(value, option);
-        else if (option == "--spacing") s.spacing = parse_double(value, option);
-        else if (option == "--thickness") s.thickness = parse_double(value, option);
-        else if (option == "--seed") s.seed = static_cast<std::uint32_t>(parse_int(value, option));
-        else if (option == "--output") { s.output = value; s.output_explicit = true; }
-        else throw std::runtime_error("Unknown option: " + option);
+        if (option != "--config") apply_option(s, option, value);
     }
     return s;
 }
@@ -210,26 +270,24 @@ std::string filename_number(double value) {
 }
 
 double filler_chain_mass(const Settings& s) {
-    return pdms_filler::chain_mass(s.n3, s.bead_mass);
+    return pdms_filler::chain_mass(s.n4, s.bead_mass);
 }
 
 long long filler_beads(const Settings& s) {
-    return 1LL * s.m3 * s.n3;
+    return 1LL * s.m4 * s.n4;
 }
 
 void resolve_filler_composition(Settings& s) {
     const bool requested = s.filler_length_explicit || s.filler_weight_explicit;
     if (!requested) {
-        s.n3 = 0;
-        s.m3 = 0;
-        if (!s.output_explicit)
-            s.output = std::string("data.") + formulation_name(s) + "_no_filler";
+        s.n4 = 0;
+        s.m4 = 0;
         return;
     }
     if (!s.filler_length_explicit || !s.filler_weight_explicit)
         throw std::runtime_error(
             "PDMS filler requires both --filler-length and --filler-wt");
-    if (s.n3 <= 0)
+    if (s.n4 <= 0)
         throw std::runtime_error("--filler-length must be positive");
     if (s.filler_weight_percent <= 0.0 || s.filler_weight_percent >= 100.0)
         throw std::runtime_error(
@@ -240,16 +298,20 @@ void resolve_filler_composition(Settings& s) {
             "--filler-min-separation must be greater than 0 and less than 15 A");
 
     const long long base_beads =
-        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + 1LL*s.n4*s.m4;
+        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + 1LL*s.n3*s.m3;
     const double base_mass = base_beads * s.bead_mass;
     const double fraction = s.filler_weight_percent / 100.0;
     const double desired_filler_mass = base_mass * fraction / (1.0 - fraction);
-    s.m3 = std::max(
-        1, static_cast<int>(std::lround(desired_filler_mass / filler_chain_mass(s))));
+    const double requested_chains = desired_filler_mass / filler_chain_mass(s);
+    if (requested_chains > static_cast<double>(kMaximumTotalBeads))
+        throw std::runtime_error(
+            "Requested filler would exceed the 150000-bead model limit");
+    s.m4 = std::max(
+        1, static_cast<int>(std::lround(requested_chains)));
 
     if (!s.output_explicit) {
-        s.output = std::string("data.") + formulation_name(s) + "_PDMS_N" +
-            std::to_string(s.n3) + "_" +
+        s.output = std::string("data.PDMS_elastomer_filler_N") +
+            std::to_string(s.n4) + "_" +
             filename_number(s.filler_weight_percent) + "wt";
     }
 }
@@ -257,14 +319,21 @@ void resolve_filler_composition(Settings& s) {
 void apply_crosslinker_stoichiometry(Settings& s) {
     if (s.crosslinker_functionality < 3)
         throw std::runtime_error("Cross-linker functionality must be at least 3 to form a network");
-    const long long reactive_ends = 2LL * s.m1;
-    if (reactive_ends % s.crosslinker_functionality != 0) {
+    const long long strand_side_groups = 2LL * s.m1;
+    const long long scaled_crosslinker_groups =
+        strand_side_groups * s.stoichiometry_crosslinker_groups;
+    const long long denominator =
+        1LL * s.crosslinker_functionality * s.stoichiometry_strand_groups;
+    if (scaled_crosslinker_groups % denominator != 0) {
         std::ostringstream message;
-        message << "Exact stoichiometry is impossible: 2*M1=" << reactive_ends
-                << " is not divisible by functionality=" << s.crosslinker_functionality;
+        message << "Exact stoichiometry is impossible: " << strand_side_groups
+                << " strand-end groups at " << s.stoichiometry_strand_groups
+                << ':' << s.stoichiometry_crosslinker_groups
+                << " cannot be represented by whole crosslinkers with functionality "
+                << s.crosslinker_functionality;
         throw std::runtime_error(message.str());
     }
-    const long long molecule_count = reactive_ends / s.crosslinker_functionality;
+    const long long molecule_count = scaled_crosslinker_groups / denominator;
     if (molecule_count > 100000000LL)
         throw std::runtime_error("Stoichiometric M2 is too large");
     s.m2 = static_cast<int>(molecule_count);
@@ -281,14 +350,14 @@ void report_composition(const Settings& s) {
     const long long component_beads[] = {
         1LL*s.n1*s.m1,
         1LL*s.n2*s.m2,
-        filler_beads(s),
-        1LL*s.n4*s.m4
+        1LL*s.n3*s.m3,
+        filler_beads(s)
     };
     const double component_masses[] = {
         component_beads[0] * s.bead_mass,
         component_beads[1] * s.bead_mass,
-        s.m3 * filler_chain_mass(s),
-        component_beads[3] * s.bead_mass
+        component_beads[2] * s.bead_mass,
+        s.m4 * filler_chain_mass(s)
     };
     long long total_beads = 0;
     long long total_molecules = 0;
@@ -307,21 +376,26 @@ void report_composition(const Settings& s) {
                   << ", beads=" << component_beads[i]
                   << ", mole%=" << std::fixed << std::setprecision(4) << mole_fraction
                   << ", realized wt%=" << realized;
-        if (i == 2 && s.m3 > 0)
+        if (i == 3 && s.m4 > 0)
             std::cerr << ", filler=PDMS"
                       << ", requested filler wt%=" << s.filler_weight_percent;
         std::cerr << '\n';
     }
     std::cerr << "  total beads=" << total_beads
               << ", total mass=" << total_mass << " g/mol-equivalent\n";
+    if (s.m3 > 0)
+        std::cerr << "  moderator functional groups=" << 4LL*s.m3
+                  << " (extra; excluded from stoichiometry)\n";
 }
 
 void validate(const Settings& s) {
     const int values[] = {s.n1, s.n2, s.n3, s.n4, s.m1, s.m2, s.m3, s.m4};
     if (std::any_of(std::begin(values), std::end(values), [](int x) { return x < 0; }))
         throw std::runtime_error("N and M values cannot be negative");
-    if (s.n4 != 5 && s.m4 != 0)
-        throw std::runtime_error("The implemented moderator is a five-bead star; use --n4 5");
+    if (s.n1 <= 0 || s.m1 <= 0)
+        throw std::runtime_error("Strand length and strand count must be positive");
+    if (s.n3 != 5 && s.m3 != 0)
+        throw std::runtime_error("The implemented moderator is a five-bead star");
     if (s.crosslinker_functionality < 3 || s.crosslinker_functionality > 16 || s.crosslinker_functionality > s.n2)
         throw std::runtime_error("Cross-linker functionality must be between 3 and min(16, N2)");
     if (s.crosslink_distribution != "regular" && s.crosslink_distribution != "random")
@@ -334,8 +408,14 @@ void validate(const Settings& s) {
     if (s.thickness == 0.0)
         throw std::runtime_error("--thickness must be positive; omit it for the cubic bulk system");
     const long long total_beads =
-        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + filler_beads(s) + 1LL*s.n4*s.m4;
-    if (total_beads <= 0) throw std::runtime_error("The formulation must contain at least one bead");
+        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + 1LL*s.n3*s.m3 + filler_beads(s);
+    if (total_beads <= 0) throw std::runtime_error("The model must contain at least one bead");
+    if (total_beads > kMaximumTotalBeads) {
+        std::ostringstream message;
+        message << "Model contains " << total_beads
+                << " beads; the maximum allowed is " << kMaximumTotalBeads;
+        throw std::runtime_error(message.str());
+    }
     if (s.output.empty()) throw std::runtime_error("Output filename cannot be empty");
 }
 
@@ -368,98 +448,6 @@ void add_linear_topology(System& sys, int first_atom, int bead_count) {
         sys.dihedrals.push_back({static_cast<int>(sys.dihedrals.size()) + 1, 1, first_atom + i, first_atom + i + 1, first_atom + i + 2, first_atom + i + 3});
 }
 
-struct PathPoint { double x, y; };
-
-std::vector<PathPoint> folded_strand_path(int bead_count, const Box& box,
-                                          double bond_length, double spacing) {
-    std::vector<PathPoint> path;
-    if (bead_count <= 0) return path;
-    const double available_x = box.lx - 2.0 * spacing;
-    if (available_x < bond_length)
-        throw std::runtime_error("Lx is too small to place a folded network strand");
-    const int horizontal_steps_max =
-        std::max(1, static_cast<int>(std::floor(available_x / bond_length)));
-    const int connector_steps_max =
-        std::max(1, static_cast<int>(std::ceil(spacing / bond_length)));
-
-    path.reserve(static_cast<size_t>(bead_count));
-    double x = 0.0, y = 0.0;
-    int direction = 1;
-    int horizontal_steps = 0;
-    int connector_steps = 0;
-    bool connecting_rows = false;
-
-    for (int bead = 0; bead < bead_count; ++bead) {
-        path.push_back({x, y});
-        if (bead + 1 == bead_count) break;
-        if (!connecting_rows && horizontal_steps < horizontal_steps_max) {
-            x += direction * bond_length;
-            ++horizontal_steps;
-        } else if (!connecting_rows) {
-            y += bond_length;
-            connecting_rows = true;
-            connector_steps = 1;
-        } else if (connector_steps < connector_steps_max) {
-            y += bond_length;
-            ++connector_steps;
-        } else {
-            direction = -direction;
-            x += direction * bond_length;
-            horizontal_steps = 1;
-            connector_steps = 0;
-            connecting_rows = false;
-        }
-    }
-    return path;
-}
-
-void add_network_strands(System& sys, const Settings& s, const Box& box) {
-    if (s.m1 == 0) return;
-    if (s.n1 <= 0) throw std::runtime_error("A nonzero M1 requires N1 > 0");
-    if (box.ly < 2.0*s.spacing || box.lz < 2.0*s.spacing)
-        throw std::runtime_error("Ly and Lz must each be at least twice the placement spacing");
-
-    const std::vector<PathPoint> path =
-        folded_strand_path(s.n1, box, s.bond_length, s.spacing);
-    double footprint_y = 0.0;
-    for (const PathPoint& point : path) footprint_y = std::max(footprint_y, point.y);
-    if (footprint_y > box.ly - 2.0*s.spacing)
-        throw std::runtime_error("Ly is too small for the folded network-strand footprint");
-
-    const int ny = std::max(1, static_cast<int>(
-        std::floor((box.ly - 2.0*s.spacing) / (footprint_y + s.spacing))) + 1);
-    const int nz = std::max(1, static_cast<int>(box.lz / s.spacing));
-    const long long capacity = 1LL * ny * nz;
-    if (capacity < s.m1) {
-        std::ostringstream msg;
-        msg << "Folded network-strand placement capacity (" << capacity
-            << ") is smaller than M1 (" << s.m1 << "). Reduce spacing.";
-        throw std::runtime_error(msg.str());
-    }
-
-    for (int molecule_index = 0; molecule_index < s.m1; ++molecule_index) {
-        const int iy = molecule_index % ny;
-        const int iz = molecule_index / ny;
-        const bool mirror_x = molecule_index % 2 != 0;
-        const double y0 = -box.ly/2 + s.spacing +
-                          iy * (footprint_y + s.spacing);
-        const double z = -box.lz/2 + s.spacing + iz * s.spacing;
-        const int molecule_id =
-            static_cast<int>(sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
-        const int first_atom = static_cast<int>(sys.atoms.size()) + 1;
-
-        for (int bead = 1; bead <= s.n1; ++bead) {
-            const PathPoint& point = path[static_cast<size_t>(bead - 1)];
-            const double x = mirror_x
-                ? box.lx/2 - s.spacing - point.x
-                : -box.lx/2 + s.spacing + point.x;
-            const int atom_type = (bead == 1 || bead == s.n1) ? 2 : 1;
-            sys.atoms.push_back({static_cast<int>(sys.atoms.size()) + 1,
-                                 molecule_id, atom_type, 0.0, x, y0 + point.y, z});
-        }
-        add_linear_topology(sys, first_atom, s.n1);
-    }
-}
 void add_linear_component(System& sys, int bead_count, int molecule_count, int component,
                           const Box& box, double bond_length, double spacing,
                           const std::set<int>& reactive_sites = {}) {
@@ -473,9 +461,7 @@ void add_linear_component(System& sys, int bead_count, int molecule_count, int c
         throw std::runtime_error("Ly and Lz must each be at least twice the placement spacing");
     const int nx = std::max(1, static_cast<int>(box.lx / (span + spacing)));
     const int ny = std::max(1, static_cast<int>(box.ly / spacing));
-    const int nz = component == 3
-        ? std::max(1, static_cast<int>((box.lz / 2.0 - spacing) / spacing) + 1)
-        : std::max(1, static_cast<int>(box.lz / spacing));
+    const int nz = std::max(1, static_cast<int>(box.lz / spacing));
     const long long capacity = 1LL * nx * ny * nz;
     if (capacity < molecule_count) {
         std::ostringstream msg;
@@ -494,7 +480,6 @@ void add_linear_component(System& sys, int bead_count, int molecule_count, int c
         const double y = (reverse ? box.ly / 2 - spacing : -box.ly / 2 + spacing) + (reverse ? -1 : 1) * iy * spacing;
         double z = 0.0;
         if (component == 2) z = box.lz / 2 - spacing - iz * spacing;
-        else if (component == 3) z = iz * spacing; // Filler starts at the midplane and grows toward +z.
         else z = -box.lz / 2 + spacing + iz * spacing;
 
         const int molecule_id = static_cast<int>(sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
@@ -541,7 +526,7 @@ void add_star_moderators(System& sys, const Settings& s, const Box& box,
     std::uniform_real_distribution<double> zdist(
         kModeratorZLowerFraction * box.lz,
         kModeratorZUpperFraction * box.lz);
-    for (int i = 0; i < s.m4; ++i) {
+    for (int i = 0; i < s.m3; ++i) {
         std::vector<pdms_filler::Vec3> candidate;
         bool accepted = false;
         for (int attempt = 0; attempt < 10000 && !accepted; ++attempt) {
@@ -593,15 +578,15 @@ void add_star_moderators(System& sys, const Settings& s, const Box& box,
 }
 
 void add_pdms_filler(System& sys, const Settings& s, const Box& box) {
-    if (s.m3 == 0) return;
+    if (s.m4 == 0) return;
     std::vector<pdms_filler::Vec3> existing;
     existing.reserve(sys.atoms.size());
     for (const Atom& atom : sys.atoms)
         existing.push_back({atom.x, atom.y, atom.z});
 
     pdms_filler::Settings filler;
-    filler.length = s.n3;
-    filler.chains = s.m3;
+    filler.length = s.n4;
+    filler.chains = s.m4;
     filler.seed = s.filler_seed;
     filler.minimum_separation = s.filler_minimum_separation;
     filler.z_lower_fraction = kFillerZLowerFraction;
@@ -648,23 +633,21 @@ void add_pdms_filler(System& sys, const Settings& s, const Box& box) {
 System build_system(const Settings& s, const Box& box) {
     System sys;
     const long long expected_atoms =
-        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + filler_beads(s) + 1LL*s.n4*s.m4;
-    if (expected_atoms > 100000000LL) throw std::runtime_error("Requested system is too large");
+        1LL*s.n1*s.m1 + 1LL*s.n2*s.m2 + 1LL*s.n3*s.m3 + filler_beads(s);
+    if (expected_atoms > kMaximumTotalBeads)
+        throw std::runtime_error("Requested system exceeds the 150000-bead limit");
     sys.atoms.reserve(static_cast<size_t>(expected_atoms));
-    if (s.folded_network)
-        add_network_strands(sys, s, box);
-    else
-        add_linear_component(
-            sys, s.n1, s.m1, 1, box, s.bond_length, s.spacing);
+    add_linear_component(
+        sys, s.n1, s.m1, 1, box, s.bond_length, s.spacing);
     const std::set<int> reactive_sites = crosslinker_sites(s);
     std::cerr << "Cross-linker type-3 sites (" << s.crosslink_distribution << "):";
     for (int site : reactive_sites) std::cerr << ' ' << site;
     std::cerr << '\n';
     add_linear_component(sys, s.n2, s.m2, 2, box, s.bond_length, s.spacing,
                          reactive_sites);
-    add_pdms_filler(sys, s, box);
     std::mt19937 rng(s.seed);
     add_star_moderators(sys, s, box, rng);
+    add_pdms_filler(sys, s, box);
     if (static_cast<long long>(sys.atoms.size()) != expected_atoms)
         throw std::logic_error("Internal error: generated atom count does not match requested composition");
     return sys;
@@ -674,8 +657,7 @@ void write_data(const Settings& s, const System& sys, const Box& box,
                 const std::string& output_path) {
     std::ofstream out(output_path);
     if (!out) throw std::runtime_error("Cannot open output file: " + output_path);
-    out << "LAMMPS data file for the " << formulation_name(s)
-        << " PDMS elastomer formulation\n\n"
+    out << "LAMMPS data file for a coarse-grained PDMS elastomer\n\n"
         << sys.atoms.size() << " atoms\n3 atom types\n"
         << sys.bonds.size() << " bonds\n2 bond types\n"
         << sys.angles.size() << " angles\n1 angle types\n"
@@ -823,7 +805,7 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         pdms_filler::maximum_repulsive_cutoff(800.0);
     const std::string suffix = files.case_name;
 
-    out << "# Generated by the " << formulation_name(s) << " PDMS elastomer generator\n"
+    out << "# Generated by the generic PDMS elastomer generator\n"
         << "# Geometry: " << (film ? "film with fixed Lz" : "periodic bulk") << "\n\n"
         << "units           real\n"
         << "boundary        p p " << (film ? "f" : "p") << "\n"
@@ -1006,19 +988,18 @@ void write_info(const Settings& s, const System& sys, const Box& box,
 
     const int n[] = {s.n1, s.n2, s.n3, s.n4};
     const int m[] = {s.m1, s.m2, s.m3, s.m4};
-    const char* names[] = {"network_strands", "crosslinkers", "pdms_filler",
-                           "star_moderators"};
+    const char* names[] = {"strands", "crosslinkers", "moderators", "filler"};
     const long long component_beads[] = {
         1LL*s.n1*s.m1,
         1LL*s.n2*s.m2,
-        filler_beads(s),
-        1LL*s.n4*s.m4
+        1LL*s.n3*s.m3,
+        filler_beads(s)
     };
     const double component_masses[] = {
         component_beads[0] * s.bead_mass,
         component_beads[1] * s.bead_mass,
-        s.m3 * filler_chain_mass(s),
-        component_beads[3] * s.bead_mass
+        component_beads[2] * s.bead_mass,
+        s.m4 * filler_chain_mass(s)
     };
     long long total_beads = 0;
     long long total_molecules = 0;
@@ -1030,7 +1011,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     }
     const double volume = box.lx * box.ly * box.lz;
     const double realized_filler_wt = total_mass == 0.0
-        ? 0.0 : 100.0 * component_masses[2] / total_mass;
+        ? 0.0 : 100.0 * component_masses[3] / total_mass;
     const double compression_scale = s.thickness > 0.0
         ? std::sqrt(s.density / s.target_density)
         : std::cbrt(s.density / s.target_density);
@@ -1040,9 +1021,9 @@ void write_info(const Settings& s, const System& sys, const Box& box,
 
     out << std::fixed << std::setprecision(8)
         << "{\n"
-        << "  \"format\": \"" << formulation_name(s) << "-model-info\",\n"
-        << "  \"format_version\": 2,\n"
-        << "  \"formulation\": \"" << formulation_name(s) << "\",\n"
+        << "  \"format\": \"pdms-elastomer-model-info\",\n"
+        << "  \"format_version\": 3,\n"
+        << "  \"model\": \"generic PDMS elastomer\",\n"
         << "  \"case_name\": \"" << json_escape(files.case_name) << "\",\n"
         << "  \"geometry\": \"" << (s.thickness > 0.0 ? "film" : "bulk") << "\",\n"
         << "  \"film_thickness_angstrom\": ";
@@ -1060,33 +1041,67 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"slurm_submit\": \"" << json_escape(files.submit_basename) << "\",\n"
         << "    \"model_info\": \"" << json_escape(files.info_basename) << "\"\n"
         << "  },\n"
+        << "  \"generator_input\": {\n"
+        << "    \"config_file\": ";
+    if (s.config_file.empty()) out << "null";
+    else out << '"' << json_escape(s.config_file) << '"';
+    out << ",\n"
+        << "    \"precedence\": \"defaults < config file < command line\",\n"
+        << "    \"resolved\": {\n"
+        << "      \"strand_length\": " << s.n1 << ",\n"
+        << "      \"strand_count\": " << s.m1 << ",\n"
+        << "      \"crosslinker_length\": " << s.n2 << ",\n"
+        << "      \"crosslinker_count\": " << s.m2 << ",\n"
+        << "      \"crosslinker_functionality\": " << s.crosslinker_functionality << ",\n"
+        << "      \"stoichiometry\": \"" << s.stoichiometry_strand_groups
+        << ':' << s.stoichiometry_crosslinker_groups << "\",\n"
+        << "      \"moderator_count\": " << s.m3 << ",\n"
+        << "      \"filler_length\": " << s.n4 << ",\n"
+        << "      \"filler_count\": " << s.m4 << ",\n"
+        << "      \"requested_filler_weight_percent\": ";
+    if (s.m4 > 0) out << s.filler_weight_percent;
+    else out << "null";
+    out << "\n"
+        << "    }\n"
+        << "  },\n"
         << "  \"components\": {\n";
+    long long first_molecule = 1;
     for (int i = 0; i < 4; ++i) {
         const long long beads = component_beads[i];
         const double weight_percent = total_mass == 0.0
             ? 0.0 : 100.0 * component_masses[i] / total_mass;
         const double molecule_percent = total_molecules == 0 ? 0.0 : 100.0 * m[i] / total_molecules;
-        out << "    \"" << names[i] << "\": {\"N\": " << n[i] << ", \"M\": " << m[i]
+        out << "    \"" << names[i] << "\": {\"component\": " << i + 1
+            << ", \"N\": " << n[i] << ", \"M\": " << m[i]
             << ", \"beads\": " << beads << ", \"weight_percent\": " << weight_percent
-            << ", \"molecule_percent\": " << molecule_percent << "}"
+            << ", \"molecule_percent\": " << molecule_percent
+            << ", \"molecule_id_start\": ";
+        if (m[i] > 0) out << first_molecule;
+        else out << "null";
+        out << ", \"molecule_id_end\": ";
+        if (m[i] > 0) out << first_molecule + m[i] - 1;
+        else out << "null";
+        out << "}"
             << (i == 3 ? "\n" : ",\n");
+        first_molecule += m[i];
     }
     out << "  },\n"
         << "  \"composition\": {\n"
         << "    \"total_beads\": " << total_beads << ",\n"
+        << "    \"maximum_allowed_beads\": " << kMaximumTotalBeads << ",\n"
         << "    \"total_mass_g_per_mol_equivalent\": " << total_mass << ",\n"
         << "    \"total_molecules\": " << total_molecules << ",\n"
         << "    \"requested_filler_weight_percent\": ";
-    if (s.m3 > 0) out << s.filler_weight_percent;
+    if (s.m4 > 0) out << s.filler_weight_percent;
     else out << "null";
     out << ",\n"
         << "    \"realized_filler_weight_percent\": " << realized_filler_wt << "\n"
         << "  },\n"
         << "  \"pdms_filler\": {\n"
-        << "    \"enabled\": " << (s.m3 > 0 ? "true" : "false") << ",\n"
-        << "    \"repeat_units_per_chain\": " << s.n3 << ",\n"
-        << "    \"chain_count\": " << s.m3 << ",\n"
-        << "    \"beads_per_chain\": " << s.n3 << ",\n"
+        << "    \"enabled\": " << (s.m4 > 0 ? "true" : "false") << ",\n"
+        << "    \"repeat_units_per_chain\": " << s.n4 << ",\n"
+        << "    \"chain_count\": " << s.m4 << ",\n"
+        << "    \"beads_per_chain\": " << s.n4 << ",\n"
         << "    \"chain_mass_g_per_mol\": " << filler_chain_mass(s) << ",\n"
         << "    \"minimum_separation_angstrom\": " << s.filler_minimum_separation << ",\n"
         << "    \"initial_z_region\": \"central_40_percent_of_box\",\n"
@@ -1101,7 +1116,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "      \"3\": {\"name\": \"reactive DMS crosslinker\", \"mass\": " << s.bead_mass << "}\n"
         << "    },\n"
         << "    \"special_bonds_lj\": [0.0, 0.0, 0.5],\n"
-        << "    \"bond_type_map\": {\"ordinary_pdms\": 1, \"moderator_internal\": 1, \"formulation_crosslink\": 2}\n"
+        << "    \"bond_type_map\": {\"ordinary_pdms\": 1, \"moderator_internal\": 1, \"crosslink\": 2}\n"
         << "  },\n"
         << "  \"crosslinker\": {\n"
         << "    \"functionality\": " << s.crosslinker_functionality << ",\n"
@@ -1114,8 +1129,18 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         first = false;
     }
     out << "],\n"
-        << "    \"type2_sites_total_including_moderators\": " << 2LL*s.m1 + 4LL*s.m4 << ",\n"
+        << "    \"type2_sites_total_including_moderators\": " << 2LL*s.m1 + 4LL*s.m3 << ",\n"
         << "    \"type3_sites_total\": " << 1LL*s.m2*s.crosslinker_functionality << "\n"
+        << "  },\n"
+        << "  \"stoichiometry\": {\n"
+        << "    \"definition\": \"strand-end functional groups : crosslinker functional groups\",\n"
+        << "    \"requested\": \"" << s.stoichiometry_strand_groups << ':'
+        << s.stoichiometry_crosslinker_groups << "\",\n"
+        << "    \"strand_end_functional_groups\": " << 2LL*s.m1 << ",\n"
+        << "    \"crosslinker_functional_groups\": "
+        << 1LL*s.m2*s.crosslinker_functionality << ",\n"
+        << "    \"moderators_included\": false,\n"
+        << "    \"extra_moderator_functional_groups\": " << 4LL*s.m3 << "\n"
         << "  },\n"
         << "  \"initial_state\": {\n"
         << "    \"bead_mass_g_per_mol\": " << s.bead_mass << ",\n"
@@ -1128,16 +1153,14 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"intercomponent_minimum_separation_angstrom\": "
         << s.filler_minimum_separation << ",\n"
         << "    \"component_z_placement\": {\n"
-        << "      \"network\": \"bottom_up\",\n"
+        << "      \"strands\": \"bottom_up\",\n"
         << "      \"crosslinker\": \"top_down\",\n"
         << "      \"pdms_filler_fraction_of_Lz\": ["
         << kFillerZLowerFraction << ", " << kFillerZUpperFraction << "],\n"
         << "      \"moderator_fraction_of_Lz\": ["
         << kModeratorZLowerFraction << ", " << kModeratorZUpperFraction << "]\n"
         << "    },\n"
-        << "    \"network_strand_initial_shape\": \""
-        << (s.folded_network ? "folded_serpentine" : "straight_linear")
-        << "\"\n"
+        << "    \"strand_initial_shape\": \"straight_linear\"\n"
         << "  },\n"
         << "  \"topology\": {\n"
         << "    \"atoms\": " << sys.atoms.size() << ",\n"
@@ -1198,10 +1221,10 @@ int main(int argc, char** argv) {
         report_composition(settings);
         const long long base_beads =
             1LL*settings.n1*settings.m1 + 1LL*settings.n2*settings.m2 +
-            1LL*settings.n4*settings.m4;
+            1LL*settings.n3*settings.m3;
         const double total_mass =
             base_beads * settings.bead_mass +
-            settings.m3 * filler_chain_mass(settings);
+            settings.m4 * filler_chain_mass(settings);
         const double volume =
             total_mass / (settings.density * kAvogadroScale);
         Box box{};
