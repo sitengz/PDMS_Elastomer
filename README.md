@@ -76,7 +76,7 @@ Lines beginning with `#` are comments. Keys may use underscores or hyphens.
 Run the generator with:
 
 ```bash
-./bin/pdms_elastomer_generator --config Generator/example_model.conf
+./bin/pdms_elastomer_generator --config examples/01_default/model.conf
 ```
 
 Command-line values override values from the file, which makes parameter
@@ -84,7 +84,7 @@ sweeps straightforward:
 
 ```bash
 ./bin/pdms_elastomer_generator \
-    --config Generator/example_model.conf \
+    --config examples/01_default/model.conf \
     --strand-count 800 \
     --output data.strands_800
 ```
@@ -173,7 +173,7 @@ those sources have not been changed in this generator-only refactor.
 ## Repository layout
 
 - `Generator/pdms_elastomer_generator.cpp`: generic model generator;
-- `Generator/example_model.conf`: reusable text-input example;
+- `examples/01_default/`: reproducible current-default sample;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: existing post-processing programs, currently unchanged;
 - `tests/smoke_test.sh`: generator build, metadata, stoichiometry, and component-order checks.
