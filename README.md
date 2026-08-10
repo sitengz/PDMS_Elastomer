@@ -1,9 +1,10 @@
 # PDMS Elastomer
 
 This repository generates a coarse-grained PDMS elastomer model with a simple,
-component-based interface. Functional strands can be linear chains or rings.
-The base model also contains short functional PDMS crosslinkers. Five-bead star
-moderators and neutral PDMS filler chains are optional.
+component-based interface. Functional strands can be linear chains, rings, or
+star polymers. The base model also contains short functional PDMS
+crosslinkers. Five-bead star moderators and neutral PDMS filler chains are
+optional.
 
 ## Build
 
@@ -28,8 +29,9 @@ Molecule IDs are consecutive and grouped in this order:
 
 The default model uses 900 linear strands of 128 beads, with both chain ends
 functional. Ring strands can instead carry a configurable number of regular or
-randomly located functional sites. Crosslinkers are 32-bead linear PDMS chains
-with four functional sites each. Moderators and filler are disabled by default.
+randomly located functional sites. Star strands have functional outer arm ends
+and support 3, 4, 6, or 8 arms. Crosslinkers are 32-bead linear PDMS chains with
+four functional sites each. Moderators and filler are disabled by default.
 
 The 2.801 Å bond length and 7.5 Å initial intermolecular spacing are fixed by
 the PDMS model rather than treated as generator inputs. The spacing represents
@@ -121,6 +123,12 @@ future analysis.
     --strand-functionality 4 \
     --strand-reactive-distribution random \
     --strand-reactive-seed 20260810
+
+./bin/pdms_elastomer_generator \
+    --strand-topology star \
+    --strand-length 32 \
+    --strand-arm-count 6 \
+    --strand-count 600
 ```
 
 Each invocation creates a case-named directory containing:
@@ -139,8 +147,9 @@ separate lower and upper wall fixes.
 ```text
 --strand-length N
 --strand-count M
---strand-topology linear|ring
+--strand-topology linear|ring|star
 --strand-functionality F
+--strand-arm-count 3|4|6|8
 --strand-reactive-distribution regular|random
 --strand-reactive-seed N
 --crosslinker-length N
@@ -170,6 +179,23 @@ uniformly, which requires the ring length to be divisible by its functionality.
 The `random` distribution samples distinct ring sites reproducibly from
 `--strand-reactive-seed`.
 
+For star strands, `--strand-length` is the number of beads in each arm and
+`--strand-arm-count` selects one of four architectures. Every outer arm end is
+functional, so star functionality equals its arm count. If the length is not
+specified, star arms default to 32 beads. Center beads are neutral and
+connected as follows:
+
+| Arms | Center beads | Arm distribution across centers |
+|---:|---:|:---|
+| 3 | 1 | 3 |
+| 4 | 1 | 4 |
+| 6 | 2 | 3 + 3 |
+| 8 | 3 | 3 + 2 + 3 |
+
+The multi-bead cores are linear. For the 6- and 8-arm architectures, every
+center bead has total bond coordination four. A complete star contains
+`center_beads + arm_count * strand_length` beads.
+
 For regular crosslinkers, reactive sites are placed at beads 1, 3, 5, and so
 on. Random placement samples distinct sites reproducibly from
 `--crosslink-seed`. Filler chains are packed in the central 40% of the box
@@ -197,6 +223,10 @@ those sources have not been changed in this generator-only refactor.
 - `examples/01_default/`: reproducible current-default sample;
 - `examples/02_ring_bifunctional/`: ring strands with two regular reactive sites;
 - `examples/03_ring_tetrafunctional/`: ring strands with four random reactive sites;
+- `examples/04_star_3arm/`: three-arm, one-center star strands;
+- `examples/05_star_4arm/`: four-arm, one-center star strands;
+- `examples/06_star_6arm/`: six-arm, two-center star strands;
+- `examples/07_star_8arm/`: eight-arm, three-center star strands;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: existing post-processing programs, currently unchanged;
 - `tests/smoke_test.sh`: generator build, metadata, stoichiometry, and component-order checks.

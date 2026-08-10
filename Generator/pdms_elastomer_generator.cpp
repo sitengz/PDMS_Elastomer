@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pdms_filler_component.hpp"
@@ -35,12 +36,17 @@ constexpr long long kMsdExpectedFrames =
 
 struct Settings {
     int n1 = 128, m1 = 900;
+    bool strand_length_explicit = false;
     int n2 = 32,  m2 = 0;   // M2 is resolved from stoichiometry.
     int n3 = 5,   m3 = 0;   // Optional five-bead star-like moderators.
     int n4 = 0,   m4 = 0;   // Optional neutral PDMS filler chains.
     int crosslinker_functionality = 4;
     std::string strand_topology = "linear";
     int strand_functionality = 2;
+    bool strand_functionality_explicit = false;
+    int star_arm_count = 4;
+    bool star_arm_count_explicit = false;
+    int star_arm_length = 0; // Resolved from N1 when the topology is star.
     std::string strand_reactive_distribution = "regular";
     std::uint32_t strand_reactive_seed = 20260810u;
     int stoichiometry_strand_groups = 1;
@@ -116,11 +122,20 @@ std::string option_name(std::string key) {
 
 void apply_option(Settings& s, const std::string& option,
                   const std::string& value) {
-    if      (option == "--strand-length") s.n1 = parse_int(value, option);
+    if      (option == "--strand-length") {
+        s.n1 = parse_int(value, option);
+        s.strand_length_explicit = true;
+    }
     else if (option == "--strand-count") s.m1 = parse_int(value, option);
     else if (option == "--strand-topology") s.strand_topology = value;
-    else if (option == "--strand-functionality")
+    else if (option == "--strand-functionality") {
         s.strand_functionality = parse_int(value, option);
+        s.strand_functionality_explicit = true;
+    }
+    else if (option == "--strand-arm-count") {
+        s.star_arm_count = parse_int(value, option);
+        s.star_arm_count_explicit = true;
+    }
     else if (option == "--strand-reactive-distribution")
         s.strand_reactive_distribution = value;
     else if (option == "--strand-reactive-seed")
@@ -207,14 +222,16 @@ void print_help(const char* program) {
         << "Usage: " << program << " [options]\n\n"
         << "Generic coarse-grained PDMS elastomer generator.\n\n"
         << "Components are written in this molecule-ID order:\n"
-        << "  1. linear or ring strands\n"
+        << "  1. linear, ring, or star strands\n"
         << "  2. functional short-chain crosslinkers\n"
         << "  3. optional five-bead star moderators\n"
         << "  4. optional neutral PDMS filler chains\n\n"
-        << "  --strand-length N       beads per strand (default: 128)\n"
+        << "  --strand-length N       beads per linear/ring strand, or per star arm\n"
+        << "                          (default: 128; star-arm default: 32)\n"
         << "  --strand-count M        number of strands (default: 900)\n"
-        << "  --strand-topology TYPE  linear or ring (default: linear)\n"
-        << "  --strand-functionality F reactive sites per strand; linear requires 2\n"
+        << "  --strand-topology TYPE  linear, ring, or star (default: linear)\n"
+        << "  --strand-functionality F reactive sites; derived from arms for stars\n"
+        << "  --strand-arm-count A    star arms: 3, 4, 6, or 8 (default: 4)\n"
         << "  --strand-reactive-distribution MODE\n"
         << "                          ring sites: regular or random (default: regular)\n"
         << "  --strand-reactive-seed N random ring-site seed (default: 20260810)\n"
@@ -242,6 +259,38 @@ void print_help(const char* program) {
         << "  --output FILE     override the automatically generated data filename\n"
         << "                    a case folder is created beside this path\n"
         << "  --help             show this help\n";
+}
+
+int star_center_count(int arm_count) {
+    if (arm_count == 3 || arm_count == 4) return 1;
+    if (arm_count == 6) return 2;
+    if (arm_count == 8) return 3;
+    throw std::runtime_error("Star arm count must be 3, 4, 6, or 8");
+}
+
+void resolve_strand_architecture(Settings& s) {
+    if (s.strand_topology != "star") {
+        if (s.star_arm_count_explicit)
+            throw std::runtime_error(
+                "--strand-arm-count requires --strand-topology star");
+        return;
+    }
+
+    const int centers = star_center_count(s.star_arm_count);
+    if (!s.strand_length_explicit) s.n1 = 32;
+    if (s.n1 <= 0)
+        throw std::runtime_error("Star arm length must be positive");
+    if (s.strand_functionality_explicit &&
+        s.strand_functionality != s.star_arm_count)
+        throw std::runtime_error(
+            "Star strand functionality must equal its arm count");
+    const long long total_beads =
+        1LL * s.star_arm_count * s.n1 + centers;
+    if (total_beads > 100000000LL)
+        throw std::runtime_error("Star strand bead count is too large");
+    s.star_arm_length = s.n1;
+    s.n1 = static_cast<int>(total_beads);
+    s.strand_functionality = s.star_arm_count;
 }
 
 Settings parse_args(int argc, char** argv) {
@@ -409,8 +458,10 @@ void validate(const Settings& s) {
         throw std::runtime_error("N and M values cannot be negative");
     if (s.n1 <= 0 || s.m1 <= 0)
         throw std::runtime_error("Strand length and strand count must be positive");
-    if (s.strand_topology != "linear" && s.strand_topology != "ring")
-        throw std::runtime_error("--strand-topology must be linear or ring");
+    if (s.strand_topology != "linear" && s.strand_topology != "ring" &&
+        s.strand_topology != "star")
+        throw std::runtime_error(
+            "--strand-topology must be linear, ring, or star");
     if (s.strand_functionality < 2 || s.strand_functionality > s.n1)
         throw std::runtime_error(
             "Strand functionality must be between 2 and the strand length");
@@ -421,7 +472,7 @@ void validate(const Settings& s) {
     if (s.strand_topology == "linear" && s.strand_functionality != 2)
         throw std::runtime_error(
             "Linear strands are bifunctional; use --strand-functionality 2");
-    if (s.strand_topology == "linear" &&
+    if (s.strand_topology != "ring" &&
         s.strand_reactive_distribution != "regular")
         throw std::runtime_error(
             "Random strand reactive sites require --strand-topology ring");
@@ -432,6 +483,14 @@ void validate(const Settings& s) {
         s.n1 % s.strand_functionality != 0)
         throw std::runtime_error(
             "Regular ring reactive sites require strand length divisible by functionality");
+    if (s.strand_topology == "star") {
+        if (s.star_arm_length <= 0)
+            throw std::runtime_error("Star arm length must be positive");
+        if (s.strand_functionality != s.star_arm_count)
+            throw std::logic_error(
+                "Internal error: star functionality does not match arm count");
+        star_center_count(s.star_arm_count);
+    }
     if (s.n3 != 5 && s.m3 != 0)
         throw std::runtime_error("The implemented moderator is a five-bead star");
     if (s.crosslinker_functionality < 3 || s.crosslinker_functionality > 16 || s.crosslinker_functionality > s.n2)
@@ -472,6 +531,13 @@ std::set<int> random_sites(int bead_count, int functionality, std::uint32_t seed
 
 std::set<int> strand_sites(const Settings& s) {
     if (s.strand_topology == "linear") return {1, s.n1};
+    if (s.strand_topology == "star") {
+        std::set<int> sites;
+        const int centers = star_center_count(s.star_arm_count);
+        for (int arm = 1; arm <= s.star_arm_count; ++arm)
+            sites.insert(centers + arm * s.star_arm_length);
+        return sites;
+    }
     if (s.strand_reactive_distribution == "random")
         return random_sites(s.n1, s.strand_functionality,
                             s.strand_reactive_seed);
@@ -480,6 +546,13 @@ std::set<int> strand_sites(const Settings& s) {
     for (int i = 0; i < s.strand_functionality; ++i)
         sites.insert(1 + i * interval);
     return sites;
+}
+
+std::string strand_reactive_distribution_name(const Settings& s) {
+    if (s.strand_topology == "ring")
+        return s.strand_reactive_distribution;
+    if (s.strand_topology == "star") return "arm_ends";
+    return "ends";
 }
 
 std::set<int> crosslinker_sites(const Settings& s) {
@@ -510,6 +583,176 @@ void add_ring_topology(System& sys, int first_atom, int bead_count) {
     for (int i = 0; i < bead_count; ++i)
         sys.dihedrals.push_back({static_cast<int>(sys.dihedrals.size()) + 1, 1,
                                  atom(i), atom(i + 1), atom(i + 2), atom(i + 3)});
+}
+
+struct StarArchitecture {
+    int center_count = 0;
+    std::vector<int> attachment_centers;
+    std::vector<std::pair<int, int>> edges;
+};
+
+StarArchitecture star_architecture(const Settings& s) {
+    StarArchitecture architecture;
+    architecture.center_count = star_center_count(s.star_arm_count);
+    architecture.attachment_centers.reserve(
+        static_cast<std::size_t>(s.star_arm_count));
+    if (s.star_arm_count == 3 || s.star_arm_count == 4) {
+        architecture.attachment_centers.assign(
+            static_cast<std::size_t>(s.star_arm_count), 0);
+    } else if (s.star_arm_count == 6) {
+        architecture.attachment_centers = {0, 0, 0, 1, 1, 1};
+    } else {
+        architecture.attachment_centers = {0, 0, 0, 1, 1, 2, 2, 2};
+    }
+
+    for (int center = 0; center + 1 < architecture.center_count; ++center)
+        architecture.edges.push_back({center, center + 1});
+    for (int arm = 0; arm < s.star_arm_count; ++arm) {
+        const int first = architecture.center_count + arm * s.star_arm_length;
+        architecture.edges.push_back({
+            architecture.attachment_centers[static_cast<std::size_t>(arm)],
+            first
+        });
+        for (int bead = 1; bead < s.star_arm_length; ++bead)
+            architecture.edges.push_back({first + bead - 1, first + bead});
+    }
+    return architecture;
+}
+
+std::vector<std::vector<int>> graph_adjacency(
+    int bead_count,
+    const std::vector<std::pair<int, int>>& edges
+) {
+    std::vector<std::vector<int>> adjacency(
+        static_cast<std::size_t>(bead_count));
+    for (const auto& edge : edges) {
+        adjacency[static_cast<std::size_t>(edge.first)].push_back(edge.second);
+        adjacency[static_cast<std::size_t>(edge.second)].push_back(edge.first);
+    }
+    return adjacency;
+}
+
+struct TopologyCounts {
+    long long bonds = 0;
+    long long angles = 0;
+    long long dihedrals = 0;
+};
+
+TopologyCounts graph_topology_counts(
+    int bead_count,
+    const std::vector<std::pair<int, int>>& edges
+) {
+    const std::vector<std::vector<int>> adjacency =
+        graph_adjacency(bead_count, edges);
+    TopologyCounts counts;
+    counts.bonds = static_cast<long long>(edges.size());
+    for (const auto& neighbors : adjacency) {
+        const long long degree = static_cast<long long>(neighbors.size());
+        counts.angles += degree * (degree - 1) / 2;
+    }
+    for (const auto& edge : edges) {
+        counts.dihedrals +=
+            (static_cast<long long>(adjacency[static_cast<std::size_t>(edge.first)].size()) - 1) *
+            (static_cast<long long>(adjacency[static_cast<std::size_t>(edge.second)].size()) - 1);
+    }
+    return counts;
+}
+
+TopologyCounts strand_topology_counts(const Settings& s) {
+    if (s.strand_topology == "ring")
+        return {s.n1, s.n1, s.n1};
+    if (s.strand_topology == "star") {
+        const StarArchitecture architecture = star_architecture(s);
+        return graph_topology_counts(s.n1, architecture.edges);
+    }
+    return {
+        std::max(0, s.n1 - 1),
+        std::max(0, s.n1 - 2),
+        std::max(0, s.n1 - 3)
+    };
+}
+
+void add_graph_topology(
+    System& sys,
+    int first_atom,
+    int bead_count,
+    const std::vector<std::pair<int, int>>& edges
+) {
+    const std::vector<std::vector<int>> adjacency =
+        graph_adjacency(bead_count, edges);
+    for (const auto& edge : edges)
+        sys.bonds.push_back({
+            static_cast<int>(sys.bonds.size()) + 1, 1,
+            first_atom + edge.first, first_atom + edge.second
+        });
+    for (int center = 0; center < bead_count; ++center) {
+        const auto& neighbors = adjacency[static_cast<std::size_t>(center)];
+        for (std::size_t a = 0; a < neighbors.size(); ++a)
+            for (std::size_t c = a + 1; c < neighbors.size(); ++c)
+                sys.angles.push_back({
+                    static_cast<int>(sys.angles.size()) + 1, 1,
+                    first_atom + neighbors[a], first_atom + center,
+                    first_atom + neighbors[c]
+                });
+    }
+    for (const auto& edge : edges) {
+        for (int a : adjacency[static_cast<std::size_t>(edge.first)]) {
+            if (a == edge.second) continue;
+            for (int d : adjacency[static_cast<std::size_t>(edge.second)]) {
+                if (d == edge.first) continue;
+                sys.dihedrals.push_back({
+                    static_cast<int>(sys.dihedrals.size()) + 1, 1,
+                    first_atom + a, first_atom + edge.first,
+                    first_atom + edge.second, first_atom + d
+                });
+            }
+        }
+    }
+}
+
+std::vector<pdms_filler::Vec3> star_arm_directions(int arm_count) {
+    using pdms_filler::Vec3;
+    const double root_three = std::sqrt(3.0);
+    const double branch_projection = arm_count == 8 ? 0.5 : -std::cos(
+        pdms_filler::radians(pdms_filler::kBondAngleDegrees));
+    const double radial = std::sqrt(
+        1.0 - branch_projection*branch_projection);
+    std::vector<Vec3> directions;
+    if (arm_count == 3) {
+        directions = {
+            {1.0, 0.0, 0.0},
+            {-0.5, 0.5*root_three, 0.0},
+            {-0.5, -0.5*root_three, 0.0}
+        };
+    } else if (arm_count == 4) {
+        directions = {
+            {1.0, 1.0, 1.0}, {1.0, -1.0, -1.0},
+            {-1.0, 1.0, -1.0}, {-1.0, -1.0, 1.0}
+        };
+    } else {
+        for (int arm = 0; arm < 3; ++arm) {
+            const double phi = 2.0*kPi*arm/3.0;
+            directions.push_back({
+                -branch_projection,
+                radial*std::cos(phi), radial*std::sin(phi)
+            });
+        }
+        if (arm_count == 8) {
+            directions.push_back({0.0, 0.0, 1.0});
+            directions.push_back({0.0, 0.0, -1.0});
+        }
+        const double phase = kPi/3.0;
+        for (int arm = 0; arm < 3; ++arm) {
+            const double phi = phase + 2.0*kPi*arm/3.0;
+            directions.push_back({
+                branch_projection,
+                radial*std::cos(phi), radial*std::sin(phi)
+            });
+        }
+    }
+    for (Vec3& direction : directions)
+        direction = pdms_filler::normalized(direction);
+    return directions;
 }
 
 void add_linear_component(System& sys, int bead_count, int molecule_count, int component,
@@ -612,6 +855,338 @@ void add_ring_strands(System& sys, const Settings& s, const Box& box,
             });
         }
         add_ring_topology(sys, first_atom, s.n1);
+    }
+}
+
+bool star_internal_geometry_allowed(
+    const std::vector<pdms_filler::Vec3>& positions,
+    const std::vector<std::vector<int>>& adjacency
+) {
+    const int bead_count = static_cast<int>(positions.size());
+    for (int source = 0; source < bead_count; ++source) {
+        std::vector<int> distance(static_cast<std::size_t>(bead_count), -1);
+        std::vector<int> queue;
+        queue.reserve(static_cast<std::size_t>(bead_count));
+        distance[static_cast<std::size_t>(source)] = 0;
+        queue.push_back(source);
+        for (std::size_t next = 0; next < queue.size(); ++next) {
+            const int current = queue[next];
+            for (int neighbor : adjacency[static_cast<std::size_t>(current)]) {
+                if (distance[static_cast<std::size_t>(neighbor)] >= 0) continue;
+                distance[static_cast<std::size_t>(neighbor)] =
+                    distance[static_cast<std::size_t>(current)] + 1;
+                queue.push_back(neighbor);
+            }
+        }
+        for (int other = source + 1; other < bead_count; ++other) {
+            const int path = distance[static_cast<std::size_t>(other)];
+            if (path <= 2) continue;
+            const double minimum = path == 3 ? 4.0 : 4.5;
+            if (pdms_filler::norm2(
+                    positions[static_cast<std::size_t>(source)] -
+                    positions[static_cast<std::size_t>(other)]) <
+                minimum * minimum)
+                return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::vector<int>> graph_distance_matrix(
+    const std::vector<std::vector<int>>& adjacency
+) {
+    const int bead_count = static_cast<int>(adjacency.size());
+    std::vector<std::vector<int>> distances(
+        static_cast<std::size_t>(bead_count),
+        std::vector<int>(static_cast<std::size_t>(bead_count), -1));
+    for (int source = 0; source < bead_count; ++source) {
+        std::vector<int> queue = {source};
+        distances[static_cast<std::size_t>(source)]
+                 [static_cast<std::size_t>(source)] = 0;
+        for (std::size_t next = 0; next < queue.size(); ++next) {
+            const int current = queue[next];
+            for (int neighbor : adjacency[static_cast<std::size_t>(current)]) {
+                int& distance = distances[static_cast<std::size_t>(source)]
+                                         [static_cast<std::size_t>(neighbor)];
+                if (distance >= 0) continue;
+                distance = distances[static_cast<std::size_t>(source)]
+                                    [static_cast<std::size_t>(current)] + 1;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    return distances;
+}
+
+std::vector<pdms_filler::Vec3> build_local_star(
+    const Settings& s,
+    const StarArchitecture& architecture,
+    const pdms_filler::Vec3& half_extent,
+    std::mt19937& random
+) {
+    using pdms_filler::Vec3;
+    const std::vector<Vec3> directions =
+        star_arm_directions(s.star_arm_count);
+    const std::vector<std::vector<int>> adjacency =
+        graph_adjacency(s.n1, architecture.edges);
+    const std::vector<std::vector<int>> distances =
+        graph_distance_matrix(adjacency);
+    std::uniform_real_distribution<double> twist(0.0, 2.0*kPi);
+    int complete_candidates = 0;
+    int internally_allowed_candidates = 0;
+    int maximum_arms_built = 0;
+
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        std::vector<Vec3> positions(static_cast<std::size_t>(s.n1));
+        std::vector<bool> placed(static_cast<std::size_t>(s.n1), false);
+        for (int center = 0; center < architecture.center_count; ++center) {
+            positions[static_cast<std::size_t>(center)] = {
+                (center - 0.5*(architecture.center_count - 1)) *
+                    kBondLengthAngstrom,
+                0.0,
+                0.0
+            };
+            placed[static_cast<std::size_t>(center)] = true;
+        }
+
+        bool built = true;
+        std::vector<int> arm_order;
+        if (s.star_arm_count == 8)
+            arm_order = {0, 1, 2, 5, 6, 7, 3, 4};
+        else {
+            for (int arm = 0; arm < s.star_arm_count; ++arm)
+                arm_order.push_back(arm);
+        }
+        for (int order_index = 0;
+             order_index < s.star_arm_count && built; ++order_index) {
+            const int arm = arm_order[static_cast<std::size_t>(order_index)];
+            const Vec3 direction = directions[static_cast<std::size_t>(arm)];
+            const auto raw_basis = pdms_filler::perpendicular_basis(direction);
+            const Vec3 center = positions[static_cast<std::size_t>(
+                architecture.attachment_centers[static_cast<std::size_t>(arm)])];
+            const int first = architecture.center_count +
+                              arm * s.star_arm_length;
+            bool arm_built = false;
+            for (int arm_attempt = 0; arm_attempt < 500 && !arm_built;
+                 ++arm_attempt) {
+                const double phi = twist(random);
+                const Vec3 first_basis =
+                    std::cos(phi)*raw_basis.first +
+                    std::sin(phi)*raw_basis.second;
+                const Vec3 second_basis =
+                    -std::sin(phi)*raw_basis.first +
+                    std::cos(phi)*raw_basis.second;
+                const int straight_prefix = s.star_arm_count == 8 ? 3 : 1;
+                const double cone =
+                    (s.star_arm_count == 6 ? 74.0 : 78.0)*kPi/180.0;
+                const double turn =
+                    (s.star_arm_count == 6 ? 60.0 : 45.0)*kPi/180.0;
+                const double handedness = arm_attempt % 2 == 0 ? 1.0 : -1.0;
+                Vec3 position = center;
+                for (int bead = 1; bead <= s.star_arm_length; ++bead) {
+                    Vec3 step_direction = direction;
+                    if (bead > straight_prefix) {
+                        const double azimuth =
+                            handedness * (bead - straight_prefix - 1) * turn;
+                        step_direction =
+                            std::cos(cone)*direction +
+                            std::sin(cone) *
+                                (std::cos(azimuth)*first_basis +
+                                 std::sin(azimuth)*second_basis);
+                    }
+                    position = position +
+                               kBondLengthAngstrom*step_direction;
+                    positions[static_cast<std::size_t>(first + bead - 1)] =
+                        position;
+                }
+
+                bool allowed = true;
+                for (int bead = first;
+                     bead < first + s.star_arm_length && allowed; ++bead) {
+                    for (int other = 0; other < s.n1; ++other) {
+                        if (other == bead) continue;
+                        const bool current_arm =
+                            other >= first &&
+                            other < first + s.star_arm_length;
+                        if (!placed[static_cast<std::size_t>(other)] &&
+                            !current_arm)
+                            continue;
+                        const int path =
+                            distances[static_cast<std::size_t>(bead)]
+                                     [static_cast<std::size_t>(other)];
+                        if (path <= 2) continue;
+                        const double minimum = path == 3 ? 4.0 : 4.5;
+                        if (pdms_filler::norm2(
+                                positions[static_cast<std::size_t>(bead)] -
+                                positions[static_cast<std::size_t>(other)]) <
+                            minimum*minimum) {
+                            allowed = false;
+                            break;
+                        }
+                    }
+                }
+                arm_built = allowed;
+            }
+            if (!arm_built) {
+                built = false;
+                break;
+            }
+            for (int bead = first; bead < first + s.star_arm_length; ++bead)
+                placed[static_cast<std::size_t>(bead)] = true;
+            maximum_arms_built = std::max(
+                maximum_arms_built, order_index + 1);
+        }
+        if (!built) continue;
+        ++complete_candidates;
+        if (!star_internal_geometry_allowed(positions, adjacency))
+            continue;
+        ++internally_allowed_candidates;
+
+        Vec3 lower = positions.front();
+        Vec3 upper = positions.front();
+        for (const Vec3& position : positions) {
+            lower.x = std::min(lower.x, position.x);
+            lower.y = std::min(lower.y, position.y);
+            lower.z = std::min(lower.z, position.z);
+            upper.x = std::max(upper.x, position.x);
+            upper.y = std::max(upper.y, position.y);
+            upper.z = std::max(upper.z, position.z);
+        }
+        const Vec3 midpoint = 0.5*(lower + upper);
+        for (Vec3& position : positions) position = position - midpoint;
+        if (0.5*(upper.x - lower.x) > half_extent.x ||
+            0.5*(upper.y - lower.y) > half_extent.y ||
+            0.5*(upper.z - lower.z) > half_extent.z)
+            continue;
+        return positions;
+    }
+    std::ostringstream message;
+    message << "Could not build a compact, self-avoiding star conformation "
+            << "for the available placement cell (complete candidates: "
+            << complete_candidates << ", internally allowed: "
+            << internally_allowed_candidates << ", half extents: "
+            << half_extent.x << ", " << half_extent.y << ", "
+            << half_extent.z << " A, maximum arms built: "
+            << maximum_arms_built
+            << "). Reduce star count or arm length, or "
+               "lower the initial density.";
+    throw std::runtime_error(message.str());
+}
+
+struct StarPlacementGrid {
+    int nx = 1;
+    int ny = 1;
+    int nz = 1;
+    double cell_x = 0.0;
+    double cell_y = 0.0;
+    double cell_z = 0.0;
+    double z_lower = 0.0;
+};
+
+StarPlacementGrid star_placement_grid(
+    const Settings& s,
+    const Box& box,
+    double z_lower,
+    double z_upper
+) {
+    const double z_length = z_upper - z_lower;
+    if (z_length <= kPlacementSpacing800KAngstrom)
+        throw std::runtime_error(
+            "Insufficient z space to place star strands below crosslinkers");
+    const int base = std::max(
+        1, static_cast<int>(std::ceil(std::cbrt(s.m1))));
+    const int maximum = 4 * base;
+    double best_score = -1.0;
+    long long best_capacity = 0;
+    StarPlacementGrid best;
+    for (int nx = 1; nx <= maximum; ++nx) {
+        for (int ny = 1; ny <= maximum; ++ny) {
+            const long long plane = 1LL*nx*ny;
+            const int nz = static_cast<int>((s.m1 + plane - 1) / plane);
+            if (nz < 1 || nz > maximum) continue;
+            const double cell_x = box.lx / nx;
+            const double cell_y = box.ly / ny;
+            const double cell_z = z_length / nz;
+            const double score = std::min({cell_x, cell_y, cell_z});
+            const long long capacity = plane*nz;
+            if (score > best_score + 1.0e-12 ||
+                (std::fabs(score - best_score) <= 1.0e-12 &&
+                 (best_capacity == 0 || capacity < best_capacity))) {
+                best_score = score;
+                best_capacity = capacity;
+                best = {nx, ny, nz, cell_x, cell_y, cell_z, z_lower};
+            }
+        }
+    }
+    if (best_capacity < s.m1)
+        throw std::runtime_error("Could not construct a star placement grid");
+    return best;
+}
+
+double star_placement_upper_z(const Settings& s, const Box& box) {
+    if (s.m2 == 0) return box.lz/2;
+    const double span = std::max(0, s.n2 - 1) * kBondLengthAngstrom;
+    const int nx = std::max(
+        1, static_cast<int>(box.lx /
+                            (span + kPlacementSpacing800KAngstrom)));
+    const int ny = std::max(
+        1, static_cast<int>(box.ly / kPlacementSpacing800KAngstrom));
+    const long long per_layer = 1LL*nx*ny;
+    const long long layers = (s.m2 + per_layer - 1) / per_layer;
+    const double lowest_crosslinker_z =
+        box.lz/2 - kPlacementSpacing800KAngstrom -
+        (layers - 1)*kPlacementSpacing800KAngstrom;
+    return lowest_crosslinker_z - kPlacementSpacing800KAngstrom;
+}
+
+void add_star_strands(
+    System& sys,
+    const Settings& s,
+    const Box& box,
+    const std::set<int>& reactive_sites
+) {
+    const StarArchitecture architecture = star_architecture(s);
+    const double z_lower = -box.lz/2;
+    const double z_upper = star_placement_upper_z(s, box);
+    const StarPlacementGrid grid =
+        star_placement_grid(s, box, z_lower, z_upper);
+    const double spacing = kPlacementSpacing800KAngstrom;
+    const pdms_filler::Vec3 half_extent{
+        0.5*(grid.cell_x - spacing),
+        0.5*(grid.cell_y - spacing),
+        0.5*(grid.cell_z - spacing)
+    };
+    if (half_extent.x <= 0.0 || half_extent.y <= 0.0 ||
+        half_extent.z <= 0.0)
+        throw std::runtime_error(
+            "Star placement cells are smaller than the 7.5 A model spacing");
+    std::mt19937 random(s.seed);
+    const std::vector<pdms_filler::Vec3> local =
+        build_local_star(s, architecture, half_extent, random);
+
+    for (int molecule_index = 0; molecule_index < s.m1; ++molecule_index) {
+        const int ix = molecule_index % grid.nx;
+        const int iy = (molecule_index / grid.nx) % grid.ny;
+        const int iz = molecule_index / (grid.nx * grid.ny);
+        const pdms_filler::Vec3 translation{
+            -box.lx/2 + (ix + 0.5)*grid.cell_x,
+            -box.ly/2 + (iy + 0.5)*grid.cell_y,
+            grid.z_lower + (iz + 0.5)*grid.cell_z
+        };
+        const int molecule_id = static_cast<int>(
+            sys.atoms.empty() ? 1 : sys.atoms.back().molecule + 1);
+        const int first_atom = static_cast<int>(sys.atoms.size()) + 1;
+        for (int bead = 0; bead < s.n1; ++bead) {
+            const pdms_filler::Vec3 position =
+                local[static_cast<std::size_t>(bead)] + translation;
+            sys.atoms.push_back({
+                static_cast<int>(sys.atoms.size()) + 1, molecule_id,
+                reactive_sites.count(bead + 1) ? 2 : 1, 0.0,
+                position.x, position.y, position.z
+            });
+        }
+        add_graph_topology(
+            sys, first_atom, s.n1, architecture.edges);
     }
 }
 
@@ -759,12 +1334,13 @@ System build_system(const Settings& s, const Box& box) {
     sys.atoms.reserve(static_cast<size_t>(expected_atoms));
     const std::set<int> strand_reactive_sites = strand_sites(s);
     std::cerr << "Strand type-2 sites (" << s.strand_topology << ", "
-              << (s.strand_topology == "ring"
-                      ? s.strand_reactive_distribution : "ends") << "):";
+              << strand_reactive_distribution_name(s) << "):";
     for (int site : strand_reactive_sites) std::cerr << ' ' << site;
     std::cerr << '\n';
     if (s.strand_topology == "ring")
         add_ring_strands(sys, s, box, strand_reactive_sites);
+    else if (s.strand_topology == "star")
+        add_star_strands(sys, s, box, strand_reactive_sites);
     else
         add_linear_component(
             sys, s.n1, s.m1, 1, box, kBondLengthAngstrom,
@@ -1150,6 +1726,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     const LjParameters cold = lj_parameters(300.0);
     const std::set<int> sites = crosslinker_sites(s);
     const std::set<int> strand_reactive_sites = strand_sites(s);
+    const TopologyCounts strand_counts = strand_topology_counts(s);
 
     out << std::fixed << std::setprecision(8)
         << "{\n"
@@ -1181,12 +1758,25 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"precedence\": \"defaults < config file < command line\",\n"
         << "    \"resolved\": {\n"
         << "      \"strand_topology\": \"" << s.strand_topology << "\",\n"
-        << "      \"strand_length\": " << s.n1 << ",\n"
+        << "      \"strand_length\": "
+        << (s.strand_topology == "star" ? s.star_arm_length : s.n1)
+        << ",\n"
+        << "      \"strand_beads_per_molecule\": " << s.n1 << ",\n"
         << "      \"strand_count\": " << s.m1 << ",\n"
         << "      \"strand_functionality\": " << s.strand_functionality << ",\n"
         << "      \"strand_reactive_distribution\": \""
-        << (s.strand_topology == "ring"
-                ? s.strand_reactive_distribution : "ends") << "\",\n"
+        << strand_reactive_distribution_name(s) << "\",\n"
+        << "      \"star_arm_count\": ";
+    if (s.strand_topology == "star") out << s.star_arm_count;
+    else out << "null";
+    out << ",\n      \"star_center_count\": ";
+    if (s.strand_topology == "star")
+        out << star_center_count(s.star_arm_count);
+    else out << "null";
+    out << ",\n      \"star_arm_length\": ";
+    if (s.strand_topology == "star") out << s.star_arm_length;
+    else out << "null";
+    out << ",\n"
         << "      \"crosslinker_length\": " << s.n2 << ",\n"
         << "      \"crosslinker_count\": " << s.m2 << ",\n"
         << "      \"crosslinker_functionality\": " << s.crosslinker_functionality << ",\n"
@@ -1225,10 +1815,21 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     out << "  },\n"
         << "  \"strand\": {\n"
         << "    \"topology\": \"" << s.strand_topology << "\",\n"
+        << "    \"beads_per_molecule\": " << s.n1 << ",\n"
         << "    \"functionality\": " << s.strand_functionality << ",\n"
         << "    \"reactive_distribution\": \""
-        << (s.strand_topology == "ring"
-                ? s.strand_reactive_distribution : "ends") << "\",\n"
+        << strand_reactive_distribution_name(s) << "\",\n"
+        << "    \"star_arm_count\": ";
+    if (s.strand_topology == "star") out << s.star_arm_count;
+    else out << "null";
+    out << ",\n    \"star_center_count\": ";
+    if (s.strand_topology == "star")
+        out << star_center_count(s.star_arm_count);
+    else out << "null";
+    out << ",\n    \"star_arm_length\": ";
+    if (s.strand_topology == "star") out << s.star_arm_length;
+    else out << "null";
+    out << ",\n"
         << "    \"reactive_bead_sites\": [";
     bool first_strand_site = true;
     for (int site : strand_reactive_sites) {
@@ -1237,12 +1838,10 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         first_strand_site = false;
     }
     out << "],\n"
-        << "    \"bonds_per_molecule\": "
-        << (s.strand_topology == "ring" ? s.n1 : s.n1 - 1) << ",\n"
-        << "    \"angles_per_molecule\": "
-        << (s.strand_topology == "ring" ? s.n1 : std::max(0, s.n1 - 2)) << ",\n"
+        << "    \"bonds_per_molecule\": " << strand_counts.bonds << ",\n"
+        << "    \"angles_per_molecule\": " << strand_counts.angles << ",\n"
         << "    \"dihedrals_per_molecule\": "
-        << (s.strand_topology == "ring" ? s.n1 : std::max(0, s.n1 - 3)) << "\n"
+        << strand_counts.dihedrals << "\n"
         << "  },\n"
         << "  \"composition\": {\n"
         << "    \"total_beads\": " << total_beads << ",\n"
@@ -1323,8 +1922,9 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << kModeratorZLowerFraction << ", " << kModeratorZUpperFraction << "]\n"
         << "    },\n"
         << "    \"strand_initial_shape\": \""
-        << (s.strand_topology == "ring" ? "planar_regular_ring"
-                                         : "straight_linear") << "\"\n"
+        << (s.strand_topology == "ring" ? "planar_regular_ring" :
+            s.strand_topology == "star" ? "compact_branched_coil" :
+                                           "straight_linear") << "\"\n"
         << "  },\n"
         << "  \"topology\": {\n"
         << "    \"atoms\": " << sys.atoms.size() << ",\n"
@@ -1334,6 +1934,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "  },\n"
         << "  \"random_seeds\": {\n"
         << "    \"strand_reactive_site_seed\": " << s.strand_reactive_seed << ",\n"
+        << "    \"star_strand_conformation_seed\": " << s.seed << ",\n"
         << "    \"crosslink_site_seed\": " << s.crosslink_seed << ",\n"
         << "    \"star_moderator_seed\": " << s.seed << ",\n"
         << "    \"pdms_filler_seed\": " << s.filler_seed << ",\n"
@@ -1379,6 +1980,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
 int main(int argc, char** argv) {
     try {
         Settings settings = parse_args(argc, argv);
+        resolve_strand_architecture(settings);
         apply_crosslinker_stoichiometry(settings);
         resolve_filler_composition(settings);
         apply_geometry_filename(settings);

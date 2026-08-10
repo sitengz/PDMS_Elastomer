@@ -33,6 +33,18 @@ run_case ring_tetrafunctional --strand-topology ring \
     --strand-length 16 --strand-count 12 --strand-functionality 4 \
     --strand-reactive-distribution random --strand-reactive-seed 12345 \
     --crosslinker-length 16 --output data.ring_tetrafunctional
+run_case star_3arm --strand-topology star --strand-length 4 \
+    --strand-count 4 --strand-arm-count 3 --crosslinker-length 8 \
+    --density 0.02 --output data.star_3arm
+run_case star_4arm --strand-topology star --strand-length 4 \
+    --strand-count 4 --strand-arm-count 4 --crosslinker-length 8 \
+    --density 0.02 --output data.star_4arm
+run_case star_6arm --strand-topology star --strand-length 4 \
+    --strand-count 2 --strand-arm-count 6 --crosslinker-length 8 \
+    --density 0.02 --output data.star_6arm
+run_case star_8arm --strand-topology star --strand-length 4 \
+    --strand-count 2 --strand-arm-count 8 --crosslinker-length 8 \
+    --density 0.02 --output data.star_8arm
 
 base_dir="$test_root/base/PDMS_elastomer"
 full_dir="$test_root/full/PDMS_elastomer_filler_N8_5wt_film_Lz40"
@@ -40,6 +52,10 @@ ratio_dir="$test_root/ratio/PDMS_elastomer"
 config_dir="$test_root/config/from_config"
 ring_bifunctional_dir="$test_root/ring_bifunctional/ring_bifunctional"
 ring_tetrafunctional_dir="$test_root/ring_tetrafunctional/ring_tetrafunctional"
+star_3arm_dir="$test_root/star_3arm/star_3arm"
+star_4arm_dir="$test_root/star_4arm/star_4arm"
+star_6arm_dir="$test_root/star_6arm/star_6arm"
+star_8arm_dir="$test_root/star_8arm/star_8arm"
 
 test -f "$base_dir/data.PDMS_elastomer"
 test -f "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
@@ -47,6 +63,10 @@ test -f "$ratio_dir/data.PDMS_elastomer"
 test -f "$config_dir/data.from_config"
 test -f "$ring_bifunctional_dir/data.ring_bifunctional"
 test -f "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
+test -f "$star_3arm_dir/data.star_3arm"
+test -f "$star_4arm_dir/data.star_4arm"
+test -f "$star_6arm_dir/data.star_6arm"
+test -f "$star_8arm_dir/data.star_8arm"
 
 check_data() {
     local data=$1
@@ -66,6 +86,10 @@ check_data "$ratio_dir/data.PDMS_elastomer"
 check_data "$config_dir/data.from_config"
 check_data "$ring_bifunctional_dir/data.ring_bifunctional"
 check_data "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
+check_data "$star_3arm_dir/data.star_3arm"
+check_data "$star_4arm_dir/data.star_4arm"
+check_data "$star_6arm_dir/data.star_6arm"
+check_data "$star_8arm_dir/data.star_8arm"
 
 grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
 test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_Lz40")" -eq 4
@@ -116,6 +140,59 @@ awk '
     END { exit !closure }
 ' "$ring_bifunctional_dir/data.ring_bifunctional"
 
+check_star() {
+    local directory=$1
+    local case_name=$2
+    local arms=$3
+    local centers=$4
+    local strand_beads=$5
+    local strand_count=$6
+    local crosslinker_count=$7
+    local center_degree=$8
+    local data="$directory/data.$case_name"
+    local info="$directory/$case_name.info"
+
+    grep -q '"topology": "star"' "$info"
+    grep -q "\"functionality\": $arms" "$info"
+    grep -q "\"beads_per_molecule\": $strand_beads" "$info"
+    grep -q "\"star_arm_count\": $arms" "$info"
+    grep -q "\"star_center_count\": $centers" "$info"
+    grep -q '"star_arm_length": 4' "$info"
+    grep -q '"reactive_distribution": "arm_ends"' "$info"
+    grep -q "\"strands\": {\"component\": 1, \"N\": $strand_beads, \"M\": $strand_count" "$info"
+    grep -q "\"crosslinkers\": {\"component\": 2, \"N\": 8, \"M\": $crosslinker_count" "$info"
+
+    awk -v molecules="$strand_count" -v arms="$arms" '
+        /^Atoms # full$/ { in_atoms = 1; next }
+        in_atoms && /^Bonds$/ { in_atoms = 0 }
+        in_atoms && NF == 7 && $2 <= molecules && $3 == 2 {
+            ++reactive[$2]
+        }
+        END {
+            for (molecule = 1; molecule <= molecules; ++molecule)
+                if (reactive[molecule] != arms) exit 1
+        }
+    ' "$data"
+
+    awk -v centers="$centers" -v expected="$center_degree" '
+        /^Bonds$/ { in_bonds = 1; next }
+        in_bonds && /^[A-Za-z]/ { in_bonds = 0 }
+        in_bonds && NF == 4 {
+            if ($3 <= centers) ++degree[$3]
+            if ($4 <= centers) ++degree[$4]
+        }
+        END {
+            for (atom = 1; atom <= centers; ++atom)
+                if (degree[atom] != expected) exit 1
+        }
+    ' "$data"
+}
+
+check_star "$star_3arm_dir" star_3arm 3 1 13 4 3 3
+check_star "$star_4arm_dir" star_4arm 4 1 17 4 4 4
+check_star "$star_6arm_dir" star_6arm 6 2 26 2 3 4
+check_star "$star_8arm_dir" star_8arm 8 3 35 2 4 4
+
 limit_dir="$test_root/limit"
 mkdir -p "$limit_dir"
 if (
@@ -139,6 +216,18 @@ if (
     exit 1
 fi
 grep -q 'divisible by functionality' "$invalid_ring_dir/ring.err"
+
+invalid_star_dir="$test_root/invalid_star"
+mkdir -p "$invalid_star_dir"
+if (
+    cd "$invalid_star_dir"
+    "$generator" --strand-topology star --strand-arm-count 5 \
+        >/dev/null 2>star.err
+); then
+    echo "unsupported star arm count unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -q 'Star arm count must be 3, 4, 6, or 8' "$invalid_star_dir/star.err"
 
 fixed_geometry_dir="$test_root/fixed_geometry"
 mkdir -p "$fixed_geometry_dir"
