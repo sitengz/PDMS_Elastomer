@@ -108,6 +108,8 @@ check_data "$grafted_bottlebrush_dir/data.grafted_bottlebrush"
 
 grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
 grep -q '^comm_modify     cutoff 25$' "$base_dir/in.PDMS_elastomer"
+grep -q '^velocity        all create 800.0 5489 mom yes rot yes dist gaussian$' \
+    "$base_dir/in.PDMS_elastomer"
 test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_Lz40")" -eq 4
 grep -q '"format": "pdms-elastomer-model-info"' "$base_dir/PDMS_elastomer.info"
 grep -q '"format_version": 3' "$base_dir/PDMS_elastomer.info"
@@ -122,6 +124,9 @@ grep -q '"extra_moderator_functional_groups": 8' "$full_dir/PDMS_elastomer_fille
 grep -q '"requested": "2:1"' "$ratio_dir/PDMS_elastomer.info"
 grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 3' "$ratio_dir/PDMS_elastomer.info"
 grep -q '"expected_frames": 1001' "$base_dir/PDMS_elastomer.info"
+grep -q '"initial_velocity_seed": 5489' "$base_dir/PDMS_elastomer.info"
+grep -q '"initial_velocity_temperature_K": 800.0' \
+    "$base_dir/PDMS_elastomer.info"
 grep -q '"hard_maximum_beads": null' "$base_dir/PDMS_elastomer.info"
 grep -q '"recommended_maximum_beads": 150000' "$base_dir/PDMS_elastomer.info"
 grep -q '"exceeds_recommended_maximum": false' "$base_dir/PDMS_elastomer.info"

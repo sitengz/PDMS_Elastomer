@@ -242,9 +242,11 @@ while avoiding the other components and box boundaries.
 
 ## Simulation template
 
-The generated LAMMPS input relaxes the low-density model at 800 K, compresses
-and crosslinks it, cools it to 300 K, performs final equilibration, and writes
-an independent 1,000,000-step NVT trajectory for MSD analysis.
+The generated LAMMPS input first assigns all beads Gaussian velocities at
+800 K using the reproducible `--seed`, with net linear and angular momentum
+removed. It then relaxes the low-density model at 800 K, compresses and
+crosslinks it, cools it to 300 K, performs final equilibration, and writes an
+independent 1,000,000-step NVT trajectory for MSD analysis.
 
 The generated Slurm file is a template for the Iowa State Nova environment.
 Review its modules, partition, memory, wall time, and email before use on a

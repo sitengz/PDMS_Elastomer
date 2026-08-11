@@ -286,7 +286,7 @@ void print_help(const char* program) {
         << "  --density X       initial packing density in g/cm^3 (default: 0.1)\n"
         << "  --target-density X density after scripted compression (default: 0.8)\n"
         << "  --thickness X     fixed film thickness Lz in angstrom; omit for bulk\n"
-        << "  --seed N          reproducible random seed (default: 5489)\n"
+        << "  --seed N          placement and initial-velocity seed (default: 5489)\n"
         << "  --output FILE     override the automatically generated data filename\n"
         << "                    a case folder is created beside this path\n"
         << "  --help             show this help\n";
@@ -1927,7 +1927,9 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << "restart         100000 restart." << suffix << ".1 restart." << suffix << ".2\n"
         << "dump            traj all custom 100000 dump." << suffix
         << ".lammpstrj id mol type q x y z ix iy iz\n"
-        << "dump_modify     traj format line \"%d %d %d %.1f %.3f %.3f %.3f %d %d %d\" sort id\n\n";
+        << "dump_modify     traj format line \"%d %d %d %.1f %.3f %.3f %.3f %d %d %d\" sort id\n"
+        << "velocity        all create 800.0 " << s.seed
+        << " mom yes rot yes dist gaussian\n\n";
 
     if (film) {
         out << "# Separate repulsive fixes for the lower and upper z box edges.\n"
@@ -2386,6 +2388,7 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"strand_reactive_site_seed\": " << s.strand_reactive_seed << ",\n"
         << "    \"star_strand_conformation_seed\": " << s.seed << ",\n"
         << "    \"grafted_strand_conformation_seed\": " << s.seed << ",\n"
+        << "    \"initial_velocity_seed\": " << s.seed << ",\n"
         << "    \"crosslink_site_seed\": " << s.crosslink_seed << ",\n"
         << "    \"star_moderator_seed\": " << s.seed << ",\n"
         << "    \"pdms_filler_seed\": " << s.filler_seed << ",\n"
@@ -2395,6 +2398,8 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"target_compressed_density_g_per_cm3\": " << s.target_density << ",\n"
         << "    \"compression_scale_per_deformed_dimension\": " << compression_scale << ",\n"
         << "    \"hot_temperature_K\": 800.0,\n"
+        << "    \"initial_velocity_temperature_K\": 800.0,\n"
+        << "    \"initial_velocity_distribution\": \"gaussian\",\n"
         << "    \"final_temperature_K\": 300.0,\n"
         << "    \"wall_style\": ";
     if (s.thickness > 0.0)
