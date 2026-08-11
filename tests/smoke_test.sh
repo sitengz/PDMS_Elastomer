@@ -107,6 +107,7 @@ check_data "$grafted_comb_dir/data.grafted_comb"
 check_data "$grafted_bottlebrush_dir/data.grafted_bottlebrush"
 
 grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
+grep -q '^comm_modify     cutoff 25$' "$base_dir/in.PDMS_elastomer"
 test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_Lz40")" -eq 4
 grep -q '"format": "pdms-elastomer-model-info"' "$base_dir/PDMS_elastomer.info"
 grep -q '"format_version": 3' "$base_dir/PDMS_elastomer.info"

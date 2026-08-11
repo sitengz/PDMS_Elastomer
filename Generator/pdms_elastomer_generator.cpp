@@ -1904,7 +1904,7 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << "special_bonds   lj 0 0 0.5\n"
         << std::fixed << std::setprecision(8)
         << "pair_style      lj/cut " << hot_global_cutoff << "\n"
-        << "comm_modify     cutoff 15\n"
+        << "comm_modify     cutoff 25\n"
         << "read_data       " << files.data_basename
         << " extra/bond/per/atom 4 extra/angle/per/atom 10"
         << " extra/dihedral/per/atom 10 extra/special/per/atom 30\n\n"
