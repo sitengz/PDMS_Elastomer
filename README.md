@@ -252,9 +252,16 @@ different cluster.
 
 ## Analysis
 
-The current generator writes generic version-3 metadata and the new component
-order. Migration of the programs under `Analysis/` is intentionally deferred;
-those sources have not been changed in this generator-only refactor.
+The topology-first analyzers read `data.<case>.npt_eq` and the matching
+version-3 `<case>.info` file. They reduce linear, ring, star, and grafted
+architectures to a common effective-strand graph, classify network defects,
+calculate strand conformation and directional periodic-image shortest paths,
+and export native Z1+ input with a companion graph mapping.
+
+The distribution analyzer reports reaction and defect profiles along z and
+can use `dump.msd.lammpstrj` for origin-layer-resolved dynamics. See
+[`Analysis/README.md`](Analysis/README.md) for commands, definitions, output
+columns, and the film/Z1+ boundary caveat.
 
 ## Repository layout
 
@@ -269,8 +276,8 @@ those sources have not been changed in this generator-only refactor.
 - `examples/08_grafted_comb/`: sparse, comb-like grafted strands;
 - `examples/09_grafted_bottlebrush/`: dense bottlebrush strands with a graft on every backbone bead;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
-- `Analysis/`: existing post-processing programs, currently unchanged;
-- `tests/smoke_test.sh`: generator build, metadata, stoichiometry, and component-order checks.
+- `Analysis/`: topology reduction, Z1+ export, z profiles, and layer dynamics;
+- `tests/smoke_test.sh`: generator and analyzer regression checks.
 
 ## References
 

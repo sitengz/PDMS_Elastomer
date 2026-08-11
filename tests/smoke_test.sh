@@ -362,4 +362,125 @@ awk '
     }
 ' "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
 
+topology_analyzer="$repo_root/bin/topology_analyzer"
+profile_analyzer="$repo_root/bin/network_profile_analyzer"
+
+reacted_copy() {
+    local source=$1
+    local destination=$2
+    local pairs=$3
+    local additions
+    additions=$(awk -F';' '{print NF}' <<< "$pairs")
+    awk -v pairs="$pairs" -v additions="$additions" '
+        /^[0-9]+ bonds$/ && NF == 2 {
+            original_bonds = $1
+            print $1 + additions, $2
+            next
+        }
+        /^Bonds$/ { in_bonds = 1; print; next }
+        /^Angles$/ && in_bonds {
+            split(pairs, entries, ";")
+            for (i = 1; i <= additions; ++i) {
+                split(entries[i], atoms, ",")
+                print original_bonds + i, 2, atoms[1], atoms[2]
+            }
+            print ""
+            in_bonds = 0
+        }
+        { print }
+    ' "$source" > "$destination"
+}
+
+mapfile -t ring_xlink_atoms < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $3 == 3 && !seen[$2]++ { print $1 }
+' "$ring_bifunctional_dir/data.ring_bifunctional" | head -2)
+ring_final="$ring_bifunctional_dir/data.ring_bifunctional.npt_eq"
+reacted_copy "$ring_bifunctional_dir/data.ring_bifunctional" "$ring_final" \
+    "1,${ring_xlink_atoms[0]};9,${ring_xlink_atoms[1]}"
+
+ring_analysis="$test_root/ring_analysis"
+"$topology_analyzer" "$ring_final" \
+    "$ring_bifunctional_dir/ring_bifunctional.info" \
+    --output-dir "$ring_analysis" --skip-self-paths >/dev/null
+grep -q $'status active: 2' \
+    "$ring_analysis/topology_report.ring_bifunctional.txt"
+grep -q $'fully_reacted_ring' \
+    "$ring_analysis/parent_molecules.ring_bifunctional.tsv"
+test "$(head -1 "$ring_analysis/config.ring_bifunctional.Z1")" -eq 2
+test "$(wc -l < "$ring_analysis/config.ring_bifunctional.Z1.map.tsv")" -eq 3
+
+mapfile -t star_xlink_atoms < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $3 == 3 && !seen[$2]++ { print $1 }
+' "$star_4arm_dir/data.star_4arm" | head -4)
+star_final="$star_4arm_dir/data.star_4arm.npt_eq"
+reacted_copy "$star_4arm_dir/data.star_4arm" "$star_final" \
+    "5,${star_xlink_atoms[0]};9,${star_xlink_atoms[1]};13,${star_xlink_atoms[2]};17,${star_xlink_atoms[3]}"
+star_analysis="$test_root/star_analysis"
+"$topology_analyzer" "$star_final" "$star_4arm_dir/star_4arm.info" \
+    --output-dir "$star_analysis" --skip-self-paths >/dev/null
+grep -q 'status active: 4' "$star_analysis/topology_report.star_4arm.txt"
+grep -q $'star_center' "$star_analysis/network_nodes.star_4arm.tsv"
+
+mapfile -t graft_sites < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $2 == 1 && $3 == 2 { print $1 }
+' "$grafted_comb_dir/data.grafted_comb")
+mapfile -t graft_xlink_atoms < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $3 == 3 && !seen[$2]++ { print $1 }
+' "$grafted_comb_dir/data.grafted_comb" | head -2)
+graft_final="$grafted_comb_dir/data.grafted_comb.npt_eq"
+reacted_copy "$grafted_comb_dir/data.grafted_comb" "$graft_final" \
+    "${graft_sites[0]},${graft_xlink_atoms[0]};${graft_sites[1]},${graft_xlink_atoms[1]}"
+graft_analysis="$test_root/graft_analysis"
+"$topology_analyzer" "$graft_final" "$grafted_comb_dir/grafted_comb.info" \
+    --output-dir "$graft_analysis" --skip-self-paths >/dev/null
+grep -q 'status active: 1' "$graft_analysis/topology_report.grafted_comb.txt"
+
+trajectory="$test_root/ring_two_frames.lammpstrj"
+awk '
+    /^[0-9]+ atoms$/ && NF == 2 { atom_count = $1 }
+    /xlo xhi$/ { xlo = $1; xhi = $2 }
+    /ylo yhi$/ { ylo = $1; yhi = $2 }
+    /zlo zhi$/ { zlo = $1; zhi = $2 }
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { in_atoms = 0 }
+    in_atoms && NF >= 7 {
+        id[++count] = $1; molecule[count] = $2; type[count] = $3
+        x[count] = $5; y[count] = $6; z[count] = $7
+    }
+    END {
+        for (frame = 0; frame < 2; ++frame) {
+            print "ITEM: TIMESTEP"
+            print frame * 1000
+            print "ITEM: NUMBER OF ATOMS"
+            print atom_count
+            print "ITEM: BOX BOUNDS pp pp pp"
+            print xlo, xhi; print ylo, yhi; print zlo, zhi
+            print "ITEM: ATOMS id mol type x y z ix iy iz"
+            for (i = 1; i <= count; ++i) {
+                displacement = frame && molecule[i] <= 12 ? 1.0 : 0.0
+                print id[i], molecule[i], type[i], x[i] + displacement,
+                      y[i], z[i], 0, 0, 0
+            }
+        }
+    }
+' "$ring_final" > "$trajectory"
+
+profile_analysis="$test_root/profile_analysis"
+"$profile_analyzer" "$ring_final" \
+    "$ring_bifunctional_dir/ring_bifunctional.info" \
+    --trajectory "$trajectory" --bin-width 20 \
+    --output-dir "$profile_analysis" >/dev/null
+test -s "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
+test -s "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
+awk 'NR > 1 && $1 == 1 && $11 > 0 { found = 1 } END { exit !found }' \
+    "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
+
 echo "PDMS elastomer smoke tests passed"
