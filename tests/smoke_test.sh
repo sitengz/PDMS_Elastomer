@@ -416,6 +416,24 @@ grep -q $'fully_reacted_ring' \
     "$ring_analysis/parent_molecules.ring_bifunctional.tsv"
 test "$(head -1 "$ring_analysis/config.ring_bifunctional.Z1")" -eq 2
 test "$(wc -l < "$ring_analysis/config.ring_bifunctional.Z1.map.tsv")" -eq 3
+read -r z1_lx z1_ly z1_lz < <(sed -n '2p' \
+    "$ring_analysis/config.ring_bifunctional.Z1")
+read -r data_lx data_ly data_lz < <(awk '
+    /xlo xhi$/ { lx = $2 - $1 }
+    /ylo yhi$/ { ly = $2 - $1 }
+    /zlo zhi$/ { lz = $2 - $1 }
+    END { printf "%.15g %.15g %.15g\n", lx, ly, lz }
+' "$ring_final")
+awk -v z1_lx="$z1_lx" -v z1_ly="$z1_ly" -v z1_lz="$z1_lz" \
+    -v data_lx="$data_lx" -v data_ly="$data_ly" -v data_lz="$data_lz" '
+    function abs(value) { return value < 0 ? -value : value }
+    BEGIN {
+        if (abs(z1_lx - data_lx) > 1e-9 ||
+            abs(z1_ly - data_ly) > 1e-9 ||
+            abs(z1_lz - data_lz) > 1e-9) exit 1
+    }
+'
+grep -q $'\t1$' "$ring_analysis/config.ring_bifunctional.Z1.map.tsv"
 
 mapfile -t star_xlink_atoms < <(awk '
     /^Atoms # full$/ { in_atoms = 1; next }

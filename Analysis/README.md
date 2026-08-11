@@ -64,11 +64,13 @@ choices are available for controlled comparisons:
 --z1-selection all-linearizable
 ```
 
-Coordinates and box dimensions are uniformly scaled only when needed to keep
-the longest contour bond at or below `--z1-max-bond` (default 1.4). The scale
-is recorded in the mapping and report. Native three-line Z1 files do not
-encode `p p f`; film confinement or fixed surface objects must be validated
-in the installed Z1+ version before interpreting film primitive paths.
+By default the Z1 file preserves the physical coordinates and the complete
+`Lx Ly Lz` box lengths from the LAMMPS snapshot. Uniform coordinate and box
+scaling is opt-in for PPA workflows that impose a maximum bond length, for
+example `--z1-max-bond 1.4`. Any applied scale is recorded in the mapping and
+report. Native three-line Z1 files do not encode `p p f`; film confinement or
+fixed surface objects must be validated in the installed Z1+ version before
+interpreting film primitive paths.
 
 ## 2. Distribution and layer dynamics
 

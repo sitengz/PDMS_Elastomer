@@ -11,7 +11,8 @@ struct Options {
     std::string info_file;
     std::string output_directory;
     std::string z1_selection = "active";
-    double z1_max_bond = 1.4;
+    double z1_max_bond = 0.0;
+    bool z1_scaling_requested = false;
     int image_search_bound = 2;
     bool skip_self_paths = false;
 };
@@ -253,7 +254,8 @@ void write_z1(
     for (const EffectiveStrand &strand : network.strands)
         if (select_for_z1(strand, options.z1_selection)) selected.push_back(&strand);
     chain_count = static_cast<long long>(selected.size());
-    coordinate_scale = z1_scale(selected, data, info, options.z1_max_bond);
+    coordinate_scale = options.z1_scaling_requested
+        ? z1_scale(selected, data, info, options.z1_max_bond) : 1.0;
     std::ofstream config(config_path);
     if (!config) throw std::runtime_error("cannot write " + config_path.string());
     config << selected.size() << '\n' << std::setprecision(15)
@@ -389,9 +391,12 @@ void write_report(
     out << "\nZ1+ export\n"
         << "  selection: " << options.z1_selection << "\n"
         << "  chains written: " << z1_chains << "\n"
-        << "  coordinate scale: " << coordinate_scale << "\n"
-        << "  scaled maximum bond target: " << options.z1_max_bond << "\n"
-        << "  crosslinker geometry and reaction bonds are not part of chain contours\n"
+        << "  coordinate scale: " << coordinate_scale << "\n";
+    if (options.z1_scaling_requested)
+        out << "  scaled maximum bond target: " << options.z1_max_bond << "\n";
+    else
+        out << "  scaling: disabled; physical coordinates and full box lengths preserved\n";
+    out << "  crosslinker geometry and reaction bonds are not part of chain contours\n"
         << "  graph connectivity is retained only in the companion mapping table\n";
     if (!info.periodic_z())
         out << "  WARNING: native three-line Z1 format does not encode p p f boundaries; validate confinement/surface handling before film PPA\n";
@@ -405,7 +410,7 @@ void print_help(const char *program) {
         << "Options:\n"
         << "  --output-dir PATH          output directory (default: analysis_<case>)\n"
         << "  --z1-selection MODE        active, active-and-dangling, or all-linearizable\n"
-        << "  --z1-max-bond X            scale only when maximum bond exceeds X (default 1.4)\n"
+        << "  --z1-max-bond X            opt-in uniform scaling for PPA bond limit\n"
         << "  --image-search-bound N     lifted-cell search bound (default 2)\n"
         << "  --skip-self-paths          omit directional periodic-image searches\n"
         << "  --help                     show this help\n";
@@ -427,14 +432,17 @@ Options parse_options(int argc, char **argv) {
         };
         if (option == "--output-dir") options.output_directory = value();
         else if (option == "--z1-selection") options.z1_selection = value();
-        else if (option == "--z1-max-bond") options.z1_max_bond = std::stod(value());
+        else if (option == "--z1-max-bond") {
+            options.z1_max_bond = std::stod(value());
+            options.z1_scaling_requested = true;
+        }
         else if (option == "--image-search-bound")
             options.image_search_bound = std::stoi(value());
         else if (option == "--skip-self-paths") options.skip_self_paths = true;
         else if (option == "--help") { print_help(argv[0]); std::exit(0); }
         else throw std::runtime_error("unknown option: " + option);
     }
-    if (options.z1_max_bond <= 0.0)
+    if (options.z1_scaling_requested && options.z1_max_bond <= 0.0)
         throw std::runtime_error("--z1-max-bond must be positive");
     if (options.image_search_bound < 1 || options.image_search_bound > 4)
         throw std::runtime_error("--image-search-bound must be between 1 and 4");
