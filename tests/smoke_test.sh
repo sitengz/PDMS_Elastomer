@@ -416,7 +416,27 @@ grep -q $'status active: 2' \
 grep -q $'fully_reacted_ring' \
     "$ring_analysis/parent_molecules.ring_bifunctional.tsv"
 test "$(head -1 "$ring_analysis/config.ring_bifunctional.Z1")" -eq 2
+test "$(sed -n '3p' "$ring_analysis/config.ring_bifunctional.Z1")" = "7 7"
 test "$(wc -l < "$ring_analysis/config.ring_bifunctional.Z1.map.tsv")" -eq 3
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    {
+        if ($header["effective_contour_beads"] != 9 ||
+            $header["z1_beads"] != 7) exit 1
+        split($header["excluded_atom_ids"], excluded, ",")
+        for (i in excluded) excluded_atoms[excluded[i]] = 1
+        count = split($header["z1_atom_ids"], atoms, ",")
+        if (count != 7) exit 1
+        for (i = 1; i <= count; ++i) {
+            if (atoms[i] == 1 || atoms[i] == 9 || seen[atoms[i]]++) exit 1
+        }
+        ++rows
+    }
+    END { exit rows != 2 || !excluded_atoms[1] || !excluded_atoms[9] }
+' "$ring_analysis/config.ring_bifunctional.Z1.map.tsv"
 read -r z1_lx z1_ly z1_lz < <(sed -n '2p' \
     "$ring_analysis/config.ring_bifunctional.Z1")
 read -r data_lx data_ly data_lz < <(awk '
@@ -435,6 +455,37 @@ awk -v z1_lx="$z1_lx" -v z1_ly="$z1_ly" -v z1_lz="$z1_lz" \
     }
 '
 grep -q $'\t1$' "$ring_analysis/config.ring_bifunctional.Z1.map.tsv"
+
+mapfile -t ring_same_xlink_atoms < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $2 == 13 && $3 == 3 { print $1 }
+' "$ring_bifunctional_dir/data.ring_bifunctional" | head -2)
+
+ring_dangling_final="$ring_bifunctional_dir/data.ring_bifunctional.dangling.npt_eq"
+reacted_copy "$ring_bifunctional_dir/data.ring_bifunctional" \
+    "$ring_dangling_final" "1,${ring_same_xlink_atoms[0]}"
+ring_dangling_analysis="$test_root/ring_dangling_analysis"
+"$topology_analyzer" "$ring_dangling_final" \
+    "$ring_bifunctional_dir/ring_bifunctional.info" \
+    --output-dir "$ring_dangling_analysis" --skip-self-paths >/dev/null
+test "$(head -1 "$ring_dangling_analysis/config.ring_bifunctional.Z1")" -eq 1
+test "$(sed -n '3p' "$ring_dangling_analysis/config.ring_bifunctional.Z1")" = "15"
+awk -F '\t' 'NR == 2 { exit !($5 == "dangling_loop" && $10 == 17 && $11 == 15) }' \
+    "$ring_dangling_analysis/config.ring_bifunctional.Z1.map.tsv"
+
+ring_self_final="$ring_bifunctional_dir/data.ring_bifunctional.self_loop.npt_eq"
+reacted_copy "$ring_bifunctional_dir/data.ring_bifunctional" \
+    "$ring_self_final" \
+    "1,${ring_same_xlink_atoms[0]};9,${ring_same_xlink_atoms[1]}"
+ring_self_analysis="$test_root/ring_self_analysis"
+"$topology_analyzer" "$ring_self_final" \
+    "$ring_bifunctional_dir/ring_bifunctional.info" \
+    --output-dir "$ring_self_analysis" --skip-self-paths >/dev/null
+test "$(head -1 "$ring_self_analysis/config.ring_bifunctional.Z1")" -eq 2
+test "$(sed -n '3p' "$ring_self_analysis/config.ring_bifunctional.Z1")" = "7 7"
+test "$(awk -F '\t' 'NR > 1 && $5 == "self_loop" { ++count } END { print count + 0 }' \
+    "$ring_self_analysis/config.ring_bifunctional.Z1.map.tsv")" -eq 2
 
 ring_final_velocities="$ring_bifunctional_dir/data.ring_bifunctional.npt_eq.velocities"
 awk '
@@ -508,6 +559,37 @@ star_analysis="$test_root/star_analysis"
     --output-dir "$star_analysis" --skip-self-paths >/dev/null
 grep -q 'status active: 4' "$star_analysis/topology_report.star_4arm.txt"
 grep -q $'star_center' "$star_analysis/network_nodes.star_4arm.tsv"
+test "$(head -1 "$star_analysis/config.star_4arm.Z1")" -eq 4
+test "$(sed -n '3p' "$star_analysis/config.star_4arm.Z1")" = "4 4 4 4"
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    {
+        if ($header["effective_contour_beads"] != 5 ||
+            $header["z1_beads"] != 4 ||
+            $header["excluded_atom_ids"] != 1) exit 1
+        count = split($header["z1_atom_ids"], atoms, ",")
+        if (count != 4) exit 1
+        for (i = 1; i <= count; ++i)
+            if (atoms[i] == 1 || seen[atoms[i]]++) exit 1
+        ++rows
+    }
+    END { exit rows != 4 }
+' "$star_analysis/config.star_4arm.Z1.map.tsv"
+
+star_partial_final="$star_4arm_dir/data.star_4arm.partial.npt_eq"
+reacted_copy "$star_4arm_dir/data.star_4arm" "$star_partial_final" \
+    "5,${star_xlink_atoms[0]}"
+star_partial_analysis="$test_root/star_partial_analysis"
+"$topology_analyzer" "$star_partial_final" "$star_4arm_dir/star_4arm.info" \
+    --output-dir "$star_partial_analysis" --skip-self-paths >/dev/null
+test "$(head -1 "$star_partial_analysis/config.star_4arm.Z1")" -eq 4
+test "$(awk -F '\t' 'NR > 1 && $5 == "active" { ++count } END { print count + 0 }' \
+    "$star_partial_analysis/config.star_4arm.Z1.map.tsv")" -eq 1
+test "$(awk -F '\t' 'NR > 1 && $5 == "dangling" { ++count } END { print count + 0 }' \
+    "$star_partial_analysis/config.star_4arm.Z1.map.tsv")" -eq 3
 
 mapfile -t graft_sites < <(awk '
     /^Atoms # full$/ { in_atoms = 1; next }
@@ -526,6 +608,109 @@ graft_analysis="$test_root/graft_analysis"
 "$topology_analyzer" "$graft_final" "$grafted_comb_dir/grafted_comb.info" \
     --output-dir "$graft_analysis" --skip-self-paths >/dev/null
 grep -q 'status active: 1' "$graft_analysis/topology_report.grafted_comb.txt"
+test "$(head -1 "$graft_analysis/config.grafted_comb.Z1")" -eq 2
+test "$(sed -n '3p' "$graft_analysis/config.grafted_comb.Z1")" = "34 8"
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    {
+        count = split($header["z1_atom_ids"], atoms, ",")
+        if (count != $header["z1_beads"]) exit 1
+        for (i = 1; i <= count; ++i)
+            if (seen[atoms[i]]++) exit 1
+        if (NR == 2) {
+            if ($header["effective_strand_id"] == 0 ||
+                $header["status"] != "active" ||
+                $header["effective_contour_beads"] != 43 ||
+                $header["z1_beads"] != 34 ||
+                $header["reacted_site_index"] != 1 ||
+                $header["first_atom"] != 80 ||
+                $header["second_atom"] != 39 ||
+                $header["next_graft_atom"] != 40) exit 1
+        } else if (NR == 3) {
+            if ($header["effective_strand_id"] != 0 ||
+                $header["status"] != "dangling" ||
+                $header["effective_contour_beads"] != 9 ||
+                $header["z1_beads"] != 8 ||
+                $header["reacted_site_index"] != 2 ||
+                $header["first_atom"] != 96 ||
+                $header["second_atom"] != 89 ||
+                $header["next_graft_atom"] != 0) exit 1
+        }
+        ++rows
+    }
+    END { exit rows != 2 }
+' "$graft_analysis/config.grafted_comb.Z1.map.tsv"
+
+graft_single_final="$grafted_comb_dir/data.grafted_comb.single.npt_eq"
+reacted_copy "$grafted_comb_dir/data.grafted_comb" "$graft_single_final" \
+    "${graft_sites[0]},${graft_xlink_atoms[0]}"
+graft_single_analysis="$test_root/graft_single_analysis"
+"$topology_analyzer" "$graft_single_final" \
+    "$grafted_comb_dir/grafted_comb.info" \
+    --output-dir "$graft_single_analysis" --skip-self-paths >/dev/null
+test "$(head -1 "$graft_single_analysis/config.grafted_comb.Z1")" -eq 1
+test "$(sed -n '3p' "$graft_single_analysis/config.grafted_comb.Z1")" = "8"
+awk -F '\t' '
+    NR == 1 { for (column = 1; column <= NF; ++column) header[$column] = column; next }
+    NR == 2 {
+        exit !($header["effective_strand_id"] == 0 &&
+            $header["status"] == "dangling" &&
+            $header["reacted_site_index"] == 1 &&
+            $header["first_atom"] == 80 && $header["second_atom"] == 73 &&
+            $header["z1_beads"] == 8)
+    }
+' "$graft_single_analysis/config.grafted_comb.Z1.map.tsv"
+
+mapfile -t graft_same_xlink_atoms < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $2 == 5 && $3 == 3 { print $1 }
+' "$grafted_comb_dir/data.grafted_comb" | head -2)
+graft_self_final="$grafted_comb_dir/data.grafted_comb.self_loop.npt_eq"
+reacted_copy "$grafted_comb_dir/data.grafted_comb" "$graft_self_final" \
+    "${graft_sites[0]},${graft_same_xlink_atoms[0]};${graft_sites[1]},${graft_same_xlink_atoms[1]}"
+graft_self_analysis="$test_root/graft_self_analysis"
+"$topology_analyzer" "$graft_self_final" \
+    "$grafted_comb_dir/grafted_comb.info" \
+    --output-dir "$graft_self_analysis" --skip-self-paths >/dev/null
+test "$(head -1 "$graft_self_analysis/config.grafted_comb.Z1")" -eq 2
+test "$(awk -F '\t' 'NR > 1 && $5 == "self_loop" { ++count } END { print count + 0 }' \
+    "$graft_self_analysis/config.grafted_comb.Z1.map.tsv")" -eq 1
+test "$(awk -F '\t' 'NR > 1 && $5 == "dangling" { ++count } END { print count + 0 }' \
+    "$graft_self_analysis/config.grafted_comb.Z1.map.tsv")" -eq 1
+
+mapfile -t bottle_graft_sites < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $2 == 1 && $3 == 2 { print $1 }
+' "$grafted_bottlebrush_dir/data.grafted_bottlebrush")
+mapfile -t bottle_xlink_atoms < <(awk '
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && /^Bonds$/ { exit }
+    in_atoms && NF >= 7 && $3 == 3 && !seen[$2]++ { print $1 }
+' "$grafted_bottlebrush_dir/data.grafted_bottlebrush" | head -2)
+bottle_final="$grafted_bottlebrush_dir/data.grafted_bottlebrush.npt_eq"
+reacted_copy "$grafted_bottlebrush_dir/data.grafted_bottlebrush" \
+    "$bottle_final" \
+    "${bottle_graft_sites[0]},${bottle_xlink_atoms[0]};${bottle_graft_sites[1]},${bottle_xlink_atoms[1]}"
+bottle_analysis="$test_root/bottle_analysis"
+"$topology_analyzer" "$bottle_final" \
+    "$grafted_bottlebrush_dir/grafted_bottlebrush.info" \
+    --output-dir "$bottle_analysis" --skip-self-paths >/dev/null
+test "$(head -1 "$bottle_analysis/config.grafted_bottlebrush.Z1")" -eq 2
+test "$(sed -n '3p' "$bottle_analysis/config.grafted_bottlebrush.Z1")" = "9 5"
+awk -F '\t' '
+    NR == 1 { for (column = 1; column <= NF; ++column) header[$column] = column; next }
+    {
+        count = split($header["z1_atom_ids"], atoms, ",")
+        for (i = 1; i <= count; ++i) if (seen[atoms[i]]++) exit 1
+        ++rows
+    }
+    END { exit rows != 2 }
+' "$bottle_analysis/config.grafted_bottlebrush.Z1.map.tsv"
 
 trajectory="$test_root/ring_two_frames.lammpstrj"
 awk '

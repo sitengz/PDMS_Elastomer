@@ -50,19 +50,43 @@ Default outputs in `analysis_<case>/` are:
 ### Z1+ export
 
 The native Z1 file contains the selected effective strands in unwrapped
-contour order. Reaction bonds and crosslinker geometry are excluded. The
-mapping table retains the original strand, molecule, endpoint atoms, and
-reduced junction IDs because native Z1 format does not store chemical graph
-connectivity.
+contour order. Reaction bonds and crosslinker geometry are excluded. Linear
+contours are unchanged. Ring reaction-site endpoints are removed from both
+neighboring arc contours, and star center beads are removed from every arm,
+so one source bead cannot occur in multiple ring or star Z1 chains.
 
-By default only active strands between distinct junctions are exported. Other
-choices are available for controlled comparisons:
+For each grafted parent, reacted side-chain ends are numbered by increasing
+backbone graft position. Path `i < n` starts at reacted end `i`, follows its
+side chain and the backbone, and stops at the bead immediately before graft
+`i+1`. Path `n` contains only the final reacted side-chain beads and excludes
+its backbone grafting bead.
+Backbone tails outside the first-to-last reacted range and nonfunctional side
+chains are omitted. This partitions the exported grafted contour without
+duplicating any source bead, including when only one graft has reacted.
+
+The mapping table retains the original strand, molecule, endpoint atoms,
+reduced junction IDs, ordered reacted-site index, next graft atom, excluded
+atom IDs, and the exact atom IDs written for each Z1 chain. This makes the
+partitioning and overlap checks auditable because native Z1 format does not
+store chemical graph connectivity.
+
+The default `network` selection keeps active, dangling, dangling-loop, and
+self-loop paths from parent molecules with at least one reacted site. Wholly
+isolated parents are omitted. This retains strands that may contribute through
+transient entanglements at lower deformation. Other choices are available for
+controlled comparisons:
 
 ```bash
+--z1-selection network
 --z1-selection active
 --z1-selection active-and-dangling
 --z1-selection all-linearizable
 ```
+
+`active-and-dangling` includes both ordinary dangling strands and one-anchor
+ring loops, but not self-loops. `all-linearizable` also includes isolated
+linear/star paths. Zero-bead paths produced by adjacent ring reaction sites
+are skipped and counted in the topology report.
 
 By default the Z1 file preserves the physical coordinates and the complete
 `Lx Ly Lz` box lengths from the LAMMPS snapshot. Uniform coordinate and box
