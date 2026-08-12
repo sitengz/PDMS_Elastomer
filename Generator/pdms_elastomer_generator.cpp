@@ -65,7 +65,9 @@ struct Settings {
     double bead_mass = 74.0;
     double density = 0.1;
     double target_density = 0.8;
-    double thickness = -1.0; // Negative selects the original cubic bulk box.
+    // Positive values select a film and specify the nominal 300 K wall-free
+    // material thickness. The generated Lz also includes two wall cutoffs.
+    double thickness = -1.0;
     std::uint32_t seed = 5489u;
     std::string output = "data.PDMS_elastomer";
     bool output_explicit = false;
@@ -285,7 +287,8 @@ void print_help(const char* program) {
         << "  --mass X          bead mass in g/mol (default: 74)\n"
         << "  --density X       initial packing density in g/cm^3 (default: 0.1)\n"
         << "  --target-density X density after scripted compression (default: 0.8)\n"
-        << "  --thickness X     fixed film thickness Lz in angstrom; omit for bulk\n"
+        << "  --thickness X     nominal 300 K wall-free film thickness in angstrom;\n"
+        << "                    generated Lz = X + 2*wall cutoff; omit for bulk\n"
         << "  --seed N          placement and initial-velocity seed (default: 5489)\n"
         << "  --output FILE     override the automatically generated data filename\n"
         << "                    a case folder is created beside this path\n"
@@ -482,7 +485,7 @@ void apply_crosslinker_stoichiometry(Settings& s) {
 
 void apply_geometry_filename(Settings& s) {
     if (s.thickness > 0.0 && !s.output_explicit)
-        s.output += "_film_Lz" + filename_number(s.thickness);
+        s.output += "_film_H" + filename_number(s.thickness);
 }
 
 void report_composition(const Settings& s) {
@@ -1946,7 +1949,7 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << "unfix           integrate\n\n";
 
     if (film) {
-        out << "# Lateral compression with crosslinking at fixed film thickness\n"
+        out << "# Lateral compression at fixed box Lz and nominal wall-free film thickness\n"
             << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
             << "fix             xlink all bond/create 1 2 3 " << hot.cutoff
             << " 2 iparam 1 1 jparam 1 1 prob "
@@ -2100,6 +2103,9 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         total_mass += component_masses[i];
     }
     const double volume = box.lx * box.ly * box.lz;
+    const double accessible_volume = box.lx * box.ly *
+        (s.thickness > 0.0 ? s.thickness : box.lz);
+    const double box_density = total_mass / (volume * kAvogadroScale);
     const double realized_filler_wt = total_mass == 0.0
         ? 0.0 : 100.0 * component_masses[3] / total_mass;
     const double compression_scale = s.thickness > 0.0
@@ -2123,7 +2129,21 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     else out << "null";
     out << ",\n  \"film_thickness_source\": ";
     if (s.thickness > 0.0)
-        out << "\"command-line value captured from the equilibrated bulk result\"";
+        out << "\"requested nominal wall-free thickness at 300 K\"";
+    else
+        out << "null";
+    out << ",\n  \"film_box_Lz_angstrom\": ";
+    if (s.thickness > 0.0) out << box.lz;
+    else out << "null";
+    out << ",\n  \"film_wall_cutoff_reference_temperature_K\": ";
+    if (s.thickness > 0.0) out << 300.0;
+    else out << "null";
+    out << ",\n  \"film_wall_cutoff_per_side_angstrom\": ";
+    if (s.thickness > 0.0) out << cold.cutoff;
+    else out << "null";
+    out << ",\n  \"film_thickness_definition\": ";
+    if (s.thickness > 0.0)
+        out << "\"Lz - 2*cold_lj.cutoff\"";
     else
         out << "null";
     out << ",\n"
@@ -2354,9 +2374,16 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "  \"initial_state\": {\n"
         << "    \"bead_mass_g_per_mol\": " << s.bead_mass << ",\n"
         << "    \"density_g_per_cm3\": " << s.density << ",\n"
+        << "    \"density_definition\": \""
+        << (s.thickness > 0.0 ?
+            "mass / nominal wall-free material volume" : "mass / box volume")
+        << "\",\n"
+        << "    \"box_density_g_per_cm3\": " << box_density << ",\n"
         << "    \"box_angstrom\": {\"Lx\": " << box.lx << ", \"Ly\": " << box.ly
         << ", \"Lz\": " << box.lz << "},\n"
         << "    \"volume_angstrom3\": " << volume << ",\n"
+        << "    \"nominal_material_volume_angstrom3\": "
+        << accessible_volume << ",\n"
         << "    \"bond_length_angstrom\": " << kBondLengthAngstrom << ",\n"
         << "    \"placement_spacing_800K_angstrom\": "
         << kPlacementSpacing800KAngstrom << ",\n"
@@ -2396,6 +2423,14 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "  },\n"
         << "  \"simulation_template\": {\n"
         << "    \"target_compressed_density_g_per_cm3\": " << s.target_density << ",\n"
+        << "    \"target_density_definition\": \""
+        << (s.thickness > 0.0 ?
+            "mass / nominal wall-free material volume" : "mass / box volume")
+        << "\",\n"
+        << "    \"target_box_density_after_deform_g_per_cm3\": "
+        << (s.thickness > 0.0 ?
+            s.target_density * s.thickness / box.lz : s.target_density)
+        << ",\n"
         << "    \"compression_scale_per_deformed_dimension\": " << compression_scale << ",\n"
         << "    \"hot_temperature_K\": 800.0,\n"
         << "    \"initial_velocity_temperature_K\": 800.0,\n"
@@ -2452,8 +2487,12 @@ int main(int argc, char** argv) {
             total_mass / (settings.density * kAvogadroScale);
         Box box{};
         if (settings.thickness > 0.0) {
-            box.lz = settings.thickness;
-            box.lx = box.ly = std::sqrt(volume / box.lz);
+            // The requested film thickness is the nominal 300 K region beyond
+            // both repulsive wall cutoffs. Density is therefore based on the
+            // wall-free material volume, not on the two added wall layers.
+            const double cold_wall_cutoff = lj_parameters(300.0).cutoff;
+            box.lz = settings.thickness + 2.0 * cold_wall_cutoff;
+            box.lx = box.ly = std::sqrt(volume / settings.thickness);
         } else {
             box.lx = box.ly = box.lz = std::cbrt(volume);
         }

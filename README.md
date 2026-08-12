@@ -150,9 +150,18 @@ Each invocation creates a case-named directory containing:
 - `submit.<case>.sh`: one-node, 96-task Slurm script;
 - `<case>.info`: version-3 JSON model metadata.
 
-Omitting `--thickness` produces a cubic, fully periodic bulk system. Supplying
-it fixes `Lz`, keeps `Lx = Ly`, uses a nonperiodic z direction, and writes
-separate lower and upper wall fixes.
+Omitting `--thickness` produces a cubic, fully periodic bulk system. For a
+film, `--thickness H` specifies the nominal wall-free material thickness at
+300 K. The generator sets
+
+```text
+Lz = H + 2*cold_wall_cutoff
+```
+
+and calculates `Lx = Ly` from the nominal material volume `Lx*Ly*H`. The full
+box uses a nonperiodic z direction and separate lower and upper repulsive wall
+fixes. The final equilibrated density profile remains the preferred way to
+measure the realized material thickness because the wall is a soft potential.
 
 ## Generator options
 
@@ -287,6 +296,7 @@ columns, and the film/Z1+ boundary caveat.
 - `examples/07_star_8arm/`: eight-arm, three-center star strands;
 - `examples/08_grafted_comb/`: sparse, comb-like grafted strands;
 - `examples/09_grafted_bottlebrush/`: dense bottlebrush strands with a graft on every backbone bead;
+- `examples/10_default_film/`: film counterpart of the default linear sample, with a thickness placeholder;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: topology reduction, static network properties, Z1+ export,
   z profiles, and layer dynamics;

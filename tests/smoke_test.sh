@@ -56,7 +56,7 @@ run_case grafted_bottlebrush --strand-topology grafted --backbone-length 24 \
     --output data.grafted_bottlebrush
 
 base_dir="$test_root/base/PDMS_elastomer"
-full_dir="$test_root/full/PDMS_elastomer_filler_N8_5wt_film_Lz40"
+full_dir="$test_root/full/PDMS_elastomer_filler_N8_5wt_film_H40"
 ratio_dir="$test_root/ratio/PDMS_elastomer"
 config_dir="$test_root/config/from_config"
 ring_bifunctional_dir="$test_root/ring_bifunctional/ring_bifunctional"
@@ -69,7 +69,7 @@ grafted_comb_dir="$test_root/grafted_comb/grafted_comb"
 grafted_bottlebrush_dir="$test_root/grafted_bottlebrush/grafted_bottlebrush"
 
 test -f "$base_dir/data.PDMS_elastomer"
-test -f "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
+test -f "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_H40"
 test -f "$ratio_dir/data.PDMS_elastomer"
 test -f "$config_dir/data.from_config"
 test -f "$ring_bifunctional_dir/data.ring_bifunctional"
@@ -94,7 +94,7 @@ check_data() {
 }
 
 check_data "$base_dir/data.PDMS_elastomer"
-check_data "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
+check_data "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_H40"
 check_data "$ratio_dir/data.PDMS_elastomer"
 check_data "$config_dir/data.from_config"
 check_data "$ring_bifunctional_dir/data.ring_bifunctional"
@@ -110,17 +110,45 @@ grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
 grep -q '^comm_modify     cutoff 25$' "$base_dir/in.PDMS_elastomer"
 grep -q '^velocity        all create 800.0 5489 mom yes rot yes dist gaussian$' \
     "$base_dir/in.PDMS_elastomer"
-test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_Lz40")" -eq 4
+test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40")" -eq 4
+grep -q '^boundary        p p f$' \
+    "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40"
+grep -q '"film_thickness_source": "requested nominal wall-free thickness at 300 K"' \
+    "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+grep -q '"film_thickness_definition": "Lz - 2\*cold_lj.cutoff"' \
+    "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+grep -q '"density_definition": "mass / nominal wall-free material volume"' \
+    "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+awk '
+    FNR == NR {
+        if ($1 == "\"film_thickness_angstrom\":") thickness = $2 + 0
+        if ($1 == "\"film_wall_cutoff_per_side_angstrom\":") cutoff = $2 + 0
+        if ($1 == "\"total_mass_g_per_mol_equivalent\":") mass = $2 + 0
+        if ($1 == "\"density_g_per_cm3\":") requested_density = $2 + 0
+        next
+    }
+    /xlo xhi$/ { lx = $2 - $1 }
+    /ylo yhi$/ { ly = $2 - $1 }
+    /zlo zhi$/ { lz = $2 - $1 }
+    END {
+        expected_lz = thickness + 2.0 * cutoff
+        material_density = mass / (0.602214076 * lx * ly * thickness)
+        if (thickness != 40.0 || cutoff <= 0.0 ||
+            (lz - expected_lz)^2 > 1.0e-10 ||
+            (material_density - requested_density)^2 > 2.5e-9) exit 1
+    }
+' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info" \
+  "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_H40"
 grep -q '"format": "pdms-elastomer-model-info"' "$base_dir/PDMS_elastomer.info"
 grep -q '"format_version": 3' "$base_dir/PDMS_elastomer.info"
 grep -q '"strands": {"component": 1, "N": 16, "M": 12' "$base_dir/PDMS_elastomer.info"
 grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 6' "$base_dir/PDMS_elastomer.info"
-grep -q '"moderators": {"component": 3, "N": 5, "M": 2' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_Lz40.info"
-grep -q '"filler": {"component": 4, "N": 8, "M": 3' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_Lz40.info"
-grep -q '"molecule_id_start": 19, "molecule_id_end": 20' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_Lz40.info"
-grep -q '"molecule_id_start": 21, "molecule_id_end": 23' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_Lz40.info"
-grep -q '"moderators_included": false' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_Lz40.info"
-grep -q '"extra_moderator_functional_groups": 8' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_Lz40.info"
+grep -q '"moderators": {"component": 3, "N": 5, "M": 2' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+grep -q '"filler": {"component": 4, "N": 8, "M": 3' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+grep -q '"molecule_id_start": 19, "molecule_id_end": 20' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+grep -q '"molecule_id_start": 21, "molecule_id_end": 23' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+grep -q '"moderators_included": false' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
+grep -q '"extra_moderator_functional_groups": 8' "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
 grep -q '"requested": "2:1"' "$ratio_dir/PDMS_elastomer.info"
 grep -q '"crosslinkers": {"component": 2, "N": 16, "M": 3' "$ratio_dir/PDMS_elastomer.info"
 grep -q '"expected_frames": 1001' "$base_dir/PDMS_elastomer.info"
@@ -366,7 +394,7 @@ awk '
             if (moderator_sites[molecule] != 4) exit 1
         if (bad_filler) exit 1
     }
-' "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
+' "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_H40"
 
 topology_analyzer="$repo_root/bin/topology_analyzer"
 basic_analyzer="$repo_root/bin/basic_network_analyzer"
