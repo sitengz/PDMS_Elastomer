@@ -188,6 +188,7 @@ measure the realized material thickness because the wall is a soft potential.
 --filler-min-separation X
 --crosslink-distribution random|regular
 --crosslink-seed N
+--target-conversion X
 --mass X
 --density X
 --target-density X
@@ -253,9 +254,35 @@ while avoiding the other components and box boundaries.
 
 The generated LAMMPS input first assigns all beads Gaussian velocities at
 800 K using the reproducible `--seed`, with net linear and angular momentum
-removed. It then relaxes the low-density model at 800 K, compresses and
-crosslinks it, cools it to 300 K, performs final equilibration, and writes an
-independent 1,000,000-step NVT trajectory for MSD analysis.
+removed. Without a conversion target, it retains the original time-controlled
+workflow: relax, compress while crosslinking, continue crosslinking for a fixed
+time, cool to 300 K, and equilibrate.
+
+Supplying `--target-conversion X` enables conversion-controlled curing. The
+generator calculates
+
+```text
+maximum_new_bonds = min(strand functional groups,
+                        crosslinker functional groups)
+target_new_bonds  = floor(X/100 * maximum_new_bonds)
+```
+
+Moderator groups remain extra and are excluded from both stoichiometry and
+this target. The model is compressed and relaxed at 800 K before
+`fix bond/create` begins. A `fix halt` condition checks the cumulative new-bond
+count every timestep and stops an extra-long, 100,000,000-step curing run when
+the target is reached; cooling and equilibration then continue normally. The
+same setting can be written in a config file as `target_conversion = 95`.
+
+Because `fix bond/create` may form several independent bonds on its final
+timestep, the realized count can exceed the target slightly. The long run is
+an upper bound rather than a guarantee: if geometric constraints produce a
+plateau below the requested conversion, curing ends after 100,000,000 steps.
+The `.info` file records the target basis, integer bond target, upper bound,
+and possible final-step overshoot.
+
+Every workflow finishes by writing an independent 1,000,000-step NVT
+trajectory for MSD analysis.
 
 The generated Slurm file is a template for the Iowa State Nova environment.
 Review its modules, partition, memory, wall time, and email before use on a

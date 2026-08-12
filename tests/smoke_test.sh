@@ -24,6 +24,12 @@ run_case full --filler-wt 5 --filler-length 8 \
     --thickness 40
 run_case ratio --strand-length 16 --strand-count 12 \
     --crosslinker-length 16 --stoichiometry 2:1
+run_case controlled_bulk --strand-length 16 --strand-count 12 \
+    --crosslinker-length 16 --stoichiometry 2:1 --moderator-count 2 \
+    --target-conversion 95 --output data.controlled_bulk
+run_case controlled_film --strand-length 16 --strand-count 12 \
+    --crosslinker-length 16 --thickness 40 --target-conversion 95 \
+    --output data.controlled_film
 run_case config --config "$repo_root/tests/basic_model.conf" --strand-count 16
 run_case ring_bifunctional --strand-topology ring \
     --strand-length 16 --strand-count 12 --strand-functionality 2 \
@@ -58,6 +64,8 @@ run_case grafted_bottlebrush --strand-topology grafted --backbone-length 24 \
 base_dir="$test_root/base/PDMS_elastomer"
 full_dir="$test_root/full/PDMS_elastomer_filler_N8_5wt_film_H40"
 ratio_dir="$test_root/ratio/PDMS_elastomer"
+controlled_bulk_dir="$test_root/controlled_bulk/controlled_bulk"
+controlled_film_dir="$test_root/controlled_film/controlled_film"
 config_dir="$test_root/config/from_config"
 ring_bifunctional_dir="$test_root/ring_bifunctional/ring_bifunctional"
 ring_tetrafunctional_dir="$test_root/ring_tetrafunctional/ring_tetrafunctional"
@@ -71,6 +79,8 @@ grafted_bottlebrush_dir="$test_root/grafted_bottlebrush/grafted_bottlebrush"
 test -f "$base_dir/data.PDMS_elastomer"
 test -f "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_H40"
 test -f "$ratio_dir/data.PDMS_elastomer"
+test -f "$controlled_bulk_dir/data.controlled_bulk"
+test -f "$controlled_film_dir/data.controlled_film"
 test -f "$config_dir/data.from_config"
 test -f "$ring_bifunctional_dir/data.ring_bifunctional"
 test -f "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
@@ -96,6 +106,8 @@ check_data() {
 check_data "$base_dir/data.PDMS_elastomer"
 check_data "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_H40"
 check_data "$ratio_dir/data.PDMS_elastomer"
+check_data "$controlled_bulk_dir/data.controlled_bulk"
+check_data "$controlled_film_dir/data.controlled_film"
 check_data "$config_dir/data.from_config"
 check_data "$ring_bifunctional_dir/data.ring_bifunctional"
 check_data "$ring_tetrafunctional_dir/data.ring_tetrafunctional"
@@ -110,6 +122,45 @@ grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
 grep -q '^comm_modify     cutoff 25$' "$base_dir/in.PDMS_elastomer"
 grep -q '^velocity        all create 800.0 5489 mom yes rot yes dist gaussian$' \
     "$base_dir/in.PDMS_elastomer"
+if grep -q 'conversion_halt' "$base_dir/in.PDMS_elastomer"; then
+    echo "default workflow unexpectedly enabled conversion control" >&2
+    exit 1
+fi
+grep -q '^variable        target_new_bonds equal 11$' \
+    "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^variable        stoichiometric_maximum_bonds equal 12$' \
+    "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 11 error continue$' \
+    "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^run             100000000$' \
+    "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^variable        target_new_bonds equal 22$' \
+    "$controlled_film_dir/in.controlled_film"
+grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 22 error continue$' \
+    "$controlled_film_dir/in.controlled_film"
+awk '
+    /fix             compress/ && !compress { compress = NR }
+    /fix             xlink/ && !xlink { xlink = NR }
+    /fix             conversion_halt/ && !halt { halt = NR }
+    /unfix           xlink/ && !unfix_xlink { unfix_xlink = NR }
+    /# Cool from 800 K to 300 K/ { cool = NR }
+    END {
+        exit !(compress < xlink && xlink < halt && halt < unfix_xlink &&
+               unfix_xlink < cool)
+    }
+' "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '"requested_percent": 95.00000000' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"basis": "minimum of strand and crosslinker functional groups; moderators excluded"' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"stoichiometric_maximum_new_bonds": 12' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"target_new_bonds": 11' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"maximum_bond_creation_steps": 100000000' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"possible_final_step_overshoot": true' \
+    "$controlled_bulk_dir/controlled_bulk.info"
 test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40")" -eq 4
 grep -q '^boundary        p p f$' \
     "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40"
@@ -319,6 +370,23 @@ grep -q '"hard_maximum_beads": null' \
     "$limit_dir/PDMS_elastomer/PDMS_elastomer.info"
 grep -q '"exceeds_recommended_maximum": true' \
     "$limit_dir/PDMS_elastomer/PDMS_elastomer.info"
+
+invalid_conversion_dir="$test_root/invalid_conversion"
+mkdir -p "$invalid_conversion_dir"
+for conversion in -1 0 100.1 nan; do
+    if (
+        cd "$invalid_conversion_dir"
+        "$generator" --strand-length 16 --strand-count 12 \
+            --crosslinker-length 16 --target-conversion "$conversion" \
+            --output "data.invalid_conversion_$conversion" \
+            >/dev/null 2>"conversion_$conversion.err"
+    ); then
+        echo "invalid target conversion unexpectedly succeeded: $conversion" >&2
+        exit 1
+    fi
+    grep -q -- '--target-conversion must be greater than 0 and at most 100 percent' \
+        "$invalid_conversion_dir/conversion_$conversion.err"
+done
 
 invalid_ring_dir="$test_root/invalid_ring"
 mkdir -p "$invalid_ring_dir"

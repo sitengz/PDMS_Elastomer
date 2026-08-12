@@ -31,6 +31,7 @@ constexpr double kModeratorZLowerFraction = 0.28;
 constexpr double kModeratorZUpperFraction = 0.38;
 constexpr long long kMsdProductionSteps = 1000000;
 constexpr int kMsdDumpEverySteps = 1000;
+constexpr long long kConversionControlledMaximumSteps = 100000000;
 constexpr long long kRecommendedTotalBeads = 150000;
 constexpr long long kMsdExpectedFrames =
     kMsdProductionSteps / kMsdDumpEverySteps + 1;
@@ -62,6 +63,8 @@ struct Settings {
     std::string crosslink_distribution = "random";
     std::uint32_t crosslink_seed = 20260722u;
     double crosslink_probability = 0.1;
+    double target_conversion_percent = -1.0;
+    bool target_conversion_explicit = false;
     double bead_mass = 74.0;
     double density = 0.1;
     double target_density = 0.8;
@@ -188,6 +191,10 @@ void apply_option(Settings& s, const std::string& option,
         s.crosslink_distribution = value;
     else if (option == "--crosslink-seed")
         s.crosslink_seed = static_cast<std::uint32_t>(parse_int(value, option));
+    else if (option == "--target-conversion") {
+        s.target_conversion_percent = parse_double(value, option);
+        s.target_conversion_explicit = true;
+    }
     else if (option == "--mass") s.bead_mass = parse_double(value, option);
     else if (option == "--density") s.density = parse_double(value, option);
     else if (option == "--target-density")
@@ -284,6 +291,9 @@ void print_help(const char* program) {
         << "  --crosslink-distribution MODE\n"
         << "                     reactive-site placement: regular or random (default: random)\n"
         << "  --crosslink-seed N random-site seed (default: 20260722)\n"
+        << "  --target-conversion X percent\n"
+        << "                     stop bond/create at X percent of the stoichiometric\n"
+        << "                     maximum; omit to retain the time-controlled workflow\n"
         << "  --mass X          bead mass in g/mol (default: 74)\n"
         << "  --density X       initial packing density in g/cm^3 (default: 0.1)\n"
         << "  --target-density X density after scripted compression (default: 0.8)\n"
@@ -483,6 +493,30 @@ void apply_crosslinker_stoichiometry(Settings& s) {
     s.m2 = static_cast<int>(molecule_count);
 }
 
+long long strand_functional_groups(const Settings& s) {
+    return 1LL * s.strand_functionality * s.m1;
+}
+
+long long crosslinker_functional_groups(const Settings& s) {
+    return 1LL * s.crosslinker_functionality * s.m2;
+}
+
+long long stoichiometric_maximum_bonds(const Settings& s) {
+    return std::min(strand_functional_groups(s),
+                    crosslinker_functional_groups(s));
+}
+
+bool conversion_control_enabled(const Settings& s) {
+    return s.target_conversion_explicit;
+}
+
+long long target_new_bonds(const Settings& s) {
+    if (!conversion_control_enabled(s)) return -1;
+    return static_cast<long long>(std::floor(
+        stoichiometric_maximum_bonds(s) *
+        s.target_conversion_percent / 100.0 + 1.0e-12));
+}
+
 void apply_geometry_filename(Settings& s) {
     if (s.thickness > 0.0 && !s.output_explicit)
         s.output += "_film_H" + filename_number(s.thickness);
@@ -535,6 +569,11 @@ void report_composition(const Settings& s) {
     if (s.m3 > 0)
         std::cerr << "  moderator functional groups=" << 4LL*s.m3
                   << " (extra; excluded from stoichiometry)\n";
+    if (conversion_control_enabled(s))
+        std::cerr << "  target conversion=" << s.target_conversion_percent
+                  << "% of " << stoichiometric_maximum_bonds(s)
+                  << " stoichiometric bonds; target new bonds="
+                  << target_new_bonds(s) << '\n';
 }
 
 void validate(const Settings& s) {
@@ -598,6 +637,15 @@ void validate(const Settings& s) {
         throw std::runtime_error("Regular placement at 1,3,5,... requires functionality <= ceil(N2/2)");
     if (s.bead_mass <= 0 || s.density <= 0 || s.target_density <= 0)
         throw std::runtime_error("Mass and densities must be positive");
+    if (conversion_control_enabled(s) &&
+        (!std::isfinite(s.target_conversion_percent) ||
+         s.target_conversion_percent <= 0.0 ||
+         s.target_conversion_percent > 100.0))
+        throw std::runtime_error(
+            "--target-conversion must be greater than 0 and at most 100 percent");
+    if (conversion_control_enabled(s) && target_new_bonds(s) < 1)
+        throw std::runtime_error(
+            "--target-conversion produces fewer than one target bond for this composition");
     if (s.thickness == 0.0)
         throw std::runtime_error("--thickness must be positive; omit it for the cubic bulk system");
     const long long total_beads =
@@ -1895,6 +1943,9 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
     const double hot_global_cutoff =
         pdms_filler::maximum_repulsive_cutoff(800.0);
     const std::string suffix = files.case_name;
+    const bool controlled_conversion = conversion_control_enabled(s);
+    const long long maximum_new_bonds = stoichiometric_maximum_bonds(s);
+    const long long requested_new_bonds = target_new_bonds(s);
 
     out << "# Generated by the generic PDMS elastomer generator\n"
         << "# Geometry: " << (film ? "film with fixed Lz" : "periodic bulk") << "\n\n"
@@ -1948,7 +1999,42 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << "write_data      data." << suffix << ".rep_800 nocoeff\n\n"
         << "unfix           integrate\n\n";
 
-    if (film) {
+    if (controlled_conversion) {
+        out << "# Reach the target density before conversion-controlled curing\n"
+            << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
+            << "fix             compress all deform 1 x scale " << compression_scale
+            << " y scale " << compression_scale;
+        if (!film) out << " z scale " << compression_scale;
+        out << " units box\n"
+            << "run             1000000\n"
+            << "unfix           compress\n\n"
+            << "# Relax the compressed uncrosslinked system at 800 K\n"
+            << "run             1000000\n\n"
+            << "# Continue for an extra-long upper bound, halting at the requested conversion\n"
+            << "fix             xlink all bond/create 1 2 3 " << hot.cutoff
+            << " 2 iparam 1 1 jparam 1 1 prob "
+            << s.crosslink_probability << " 348154\n"
+            << "variable        target_new_bonds equal " << requested_new_bonds << "\n"
+            << "variable        stoichiometric_maximum_bonds equal "
+            << maximum_new_bonds << "\n"
+            << "variable        created_new_bonds equal f_xlink[2]\n"
+            << "variable        conversion_percent equal 100.0*v_created_new_bonds/v_stoichiometric_maximum_bonds\n"
+            << "thermo_style    custom step temp density etotal epair ebond eangle"
+            << " edihed f_xlink[1] f_xlink[2] v_conversion_percent bonds\n"
+            << "fix             conversion_halt all halt 1 v_created_new_bonds >= "
+            << requested_new_bonds << " error continue\n"
+            << "run             " << kConversionControlledMaximumSteps << "\n"
+            << "print           \"Conversion-controlled curing finished with "
+               "$(f_xlink[2]:%.0f) new bonds; target "
+            << requested_new_bonds << " of " << maximum_new_bonds << "\"\n"
+            << "unfix           conversion_halt\n"
+            << "variable        conversion_percent delete\n"
+            << "variable        created_new_bonds delete\n"
+            << "variable        stoichiometric_maximum_bonds delete\n"
+            << "variable        target_new_bonds delete\n"
+            << "unfix           xlink\n"
+            << "unfix           integrate\n";
+    } else if (film) {
         out << "# Lateral compression at fixed box Lz and nominal wall-free film thickness\n"
             << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
             << "fix             xlink all bond/create 1 2 3 " << hot.cutoff
@@ -2111,6 +2197,9 @@ void write_info(const Settings& s, const System& sys, const Box& box,
     const double compression_scale = s.thickness > 0.0
         ? std::sqrt(s.density / s.target_density)
         : std::cbrt(s.density / s.target_density);
+    const bool controlled_conversion = conversion_control_enabled(s);
+    const long long maximum_new_bonds = stoichiometric_maximum_bonds(s);
+    const long long requested_new_bonds = target_new_bonds(s);
     const LjParameters hot = lj_parameters(800.0);
     const LjParameters cold = lj_parameters(300.0);
     const std::set<int> sites = crosslinker_sites(s);
@@ -2421,8 +2510,29 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"pdms_filler_seed\": " << s.filler_seed << ",\n"
         << "    \"bond_creation_seed\": 348154\n"
         << "  },\n"
-        << "  \"simulation_template\": {\n"
-        << "    \"target_compressed_density_g_per_cm3\": " << s.target_density << ",\n"
+        << "  \"simulation_template\": {\n";
+    if (controlled_conversion) {
+        out << "    \"conversion_control\": {\n"
+            << "      \"enabled\": true,\n"
+            << "      \"requested_percent\": "
+            << s.target_conversion_percent << ",\n"
+            << "      \"basis\": \"minimum of strand and crosslinker functional groups; moderators excluded\",\n"
+            << "      \"strand_functional_groups\": "
+            << strand_functional_groups(s) << ",\n"
+            << "      \"crosslinker_functional_groups\": "
+            << crosslinker_functional_groups(s) << ",\n"
+            << "      \"stoichiometric_maximum_new_bonds\": "
+            << maximum_new_bonds << ",\n"
+            << "      \"target_new_bonds\": " << requested_new_bonds << ",\n"
+            << "      \"integer_rounding\": \"floor\",\n"
+            << "      \"controller\": \"fix bond/create cumulative count plus fix halt\",\n"
+            << "      \"halt_check_every_steps\": 1,\n"
+            << "      \"maximum_bond_creation_steps\": "
+            << kConversionControlledMaximumSteps << ",\n"
+            << "      \"possible_final_step_overshoot\": true\n"
+            << "    },\n";
+    }
+    out << "    \"target_compressed_density_g_per_cm3\": " << s.target_density << ",\n"
         << "    \"target_density_definition\": \""
         << (s.thickness > 0.0 ?
             "mass / nominal wall-free material volume" : "mass / box volume")
@@ -2446,9 +2556,15 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << "    \"cold_lj\": {\"epsilon\": " << cold.epsilon << ", \"sigma\": " << cold.sigma
         << ", \"cutoff\": " << cold.cutoff << "},\n"
         << "    \"timestep_fs\": 5.0,\n"
-        << "    \"equilibration_run_steps\": 7000000,\n"
-        << "    \"total_run_steps\": 8000000,\n"
-        << "    \"bond_creation_active_steps\": 4000000,\n"
+        << "    \"equilibration_run_steps\": "
+        << (controlled_conversion ? 105000000LL : 7000000LL) << ",\n"
+        << "    \"total_run_steps\": "
+        << (controlled_conversion ? 106000000LL : 8000000LL) << ",\n";
+    if (controlled_conversion)
+        out << "    \"run_steps_are_upper_bounds\": true,\n";
+    out << "    \"bond_creation_active_steps\": "
+        << (controlled_conversion ? kConversionControlledMaximumSteps : 4000000LL)
+        << ",\n"
         << "    \"bond_creation_probability\": "
         << s.crosslink_probability << ",\n"
         << "    \"msd_production\": {\n"
