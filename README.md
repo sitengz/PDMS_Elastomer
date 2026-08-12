@@ -268,11 +268,14 @@ target_new_bonds  = floor(X/100 * maximum_new_bonds)
 ```
 
 Moderator groups remain extra and are excluded from both stoichiometry and
-this target. The model is compressed and relaxed at 800 K before
-`fix bond/create` begins. A `fix halt` condition checks the cumulative new-bond
-count every timestep and stops an extra-long, 100,000,000-step curing run when
-the target is reached; cooling and equilibration then continue normally. The
-same setting can be written in a config file as `target_conversion = 95`.
+this target. At 800 K, `fix bond/create` and its conversion counter are enabled
+before compression begins, matching the original reaction/compression order.
+A `fix halt` condition checks the cumulative new-bond count every timestep. If
+the target is reached during compression, bond creation is disabled and the
+remaining compression is completed before relaxation and cooling. Otherwise,
+crosslinking continues through the compressed relaxation and an extra-long,
+100,000,000-step curing stage. The same setting can be written in a config
+file as `target_conversion = 95`.
 
 Because `fix bond/create` may form several independent bonds on its final
 timestep, the realized count can exceed the target slightly. The long run is

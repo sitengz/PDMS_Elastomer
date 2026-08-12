@@ -139,16 +139,20 @@ grep -q '^variable        target_new_bonds equal 22$' \
 grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 22 error continue$' \
     "$controlled_film_dir/in.controlled_film"
 awk '
-    /fix             compress/ && !compress { compress = NR }
     /fix             xlink/ && !xlink { xlink = NR }
     /fix             conversion_halt/ && !halt { halt = NR }
+    /fix             compress/ && !compress { compress = NR }
     /unfix           xlink/ && !unfix_xlink { unfix_xlink = NR }
     /# Cool from 800 K to 300 K/ { cool = NR }
     END {
-        exit !(compress < xlink && xlink < halt && halt < unfix_xlink &&
+        exit !(xlink < halt && halt < compress && compress < unfix_xlink &&
                unfix_xlink < cool)
     }
 ' "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^label           conversion_reached_during_compression$' \
+    "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^fix             compress_remaining all deform 1 x final ' \
+    "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '"requested_percent": 95.00000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"basis": "minimum of strand and crosslinker functional groups; moderators excluded"' \
@@ -157,7 +161,13 @@ grep -q '"stoichiometric_maximum_new_bonds": 12' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"target_new_bonds": 11' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"maximum_bond_creation_steps": 100000000' \
+grep -q '"crosslinking_starts_before_compression": true' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"finish_compression_after_early_halt": true' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"extra_long_curing_steps": 100000000' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"maximum_bond_creation_active_steps": 102000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"possible_final_step_overshoot": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
