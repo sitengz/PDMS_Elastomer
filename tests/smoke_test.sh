@@ -132,7 +132,7 @@ grep -q '^variable        stoichiometric_maximum_bonds equal 12$' \
     "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 11 error continue$' \
     "$controlled_bulk_dir/in.controlled_bulk"
-grep -q '^run             100000000$' \
+grep -q '^run             10000000$' \
     "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '^variable        target_new_bonds equal 22$' \
     "$controlled_film_dir/in.controlled_film"
@@ -142,17 +142,26 @@ awk '
     /fix             xlink/ && !xlink { xlink = NR }
     /fix             conversion_halt/ && !halt { halt = NR }
     /fix             compress/ && !compress { compress = NR }
+    /unfix           conversion_halt/ && !unfix_halt { unfix_halt = NR }
     /unfix           xlink/ && !unfix_xlink { unfix_xlink = NR }
+    /thermo_style    custom step temp density lx ly lz pxx pyy pzz/ &&
+        unfix_xlink && NR > unfix_xlink && !thermo_reset { thermo_reset = NR }
     /# Cool from 800 K to 300 K/ { cool = NR }
     END {
-        exit !(xlink < halt && halt < compress && compress < unfix_xlink &&
-               unfix_xlink < cool)
+        exit !(xlink < halt && halt < unfix_halt &&
+               unfix_halt < unfix_xlink && unfix_xlink < thermo_reset &&
+               thermo_reset < compress && compress < cool)
     }
 ' "$controlled_bulk_dir/in.controlled_bulk"
-grep -q '^label           conversion_reached_during_compression$' \
-    "$controlled_bulk_dir/in.controlled_bulk"
-grep -q '^fix             compress_remaining all deform 1 x final ' \
-    "$controlled_bulk_dir/in.controlled_bulk"
+test "$(grep -c '^unfix           conversion_halt$' \
+    "$controlled_bulk_dir/in.controlled_bulk")" -eq 1
+test "$(grep -c '^unfix           xlink$' \
+    "$controlled_bulk_dir/in.controlled_bulk")" -eq 1
+if grep -Eq '^(if|jump|label) +.*conversion_' \
+    "$controlled_bulk_dir/in.controlled_bulk"; then
+    echo "controlled workflow unexpectedly contains conversion branches" >&2
+    exit 1
+fi
 grep -q '"requested_percent": 95.00000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"basis": "minimum of strand and crosslinker functional groups; moderators excluded"' \
@@ -163,11 +172,9 @@ grep -q '"target_new_bonds": 11' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"crosslinking_starts_before_compression": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"finish_compression_after_early_halt": true' \
+grep -q '"crosslinking_disabled_before_compression": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"extra_long_curing_steps": 100000000' \
-    "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"maximum_bond_creation_active_steps": 102000000' \
+grep -q '"maximum_bond_creation_steps": 10000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"possible_final_step_overshoot": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
