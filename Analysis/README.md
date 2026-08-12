@@ -4,7 +4,7 @@ The analyzers use the final LAMMPS data snapshot, normally
 `data.<case>.npt_eq`, together with the matching version-3 `<case>.info` file.
 They recognize linear, ring, star, and grafted component-1 architectures.
 
-Build both programs from the repository root:
+Build all three programs from the repository root:
 
 ```bash
 make
@@ -72,7 +72,45 @@ report. Native three-line Z1 files do not encode `p p f`; film confinement or
 fixed surface objects must be validated in the installed Z1+ version before
 interpreting film primitive paths.
 
-## 2. Distribution and layer dynamics
+## 2. Basic network information
+
+Run the static network analyzer after topology reduction:
+
+```bash
+./bin/basic_network_analyzer data.CASE.npt_eq CASE.info
+```
+
+It uses exactly the same architecture-to-strand reduction as the topology
+analyzer. For each effective strand it reports contour length (`Lc`),
+end-to-end vector and distance (`Ree`), radius of gyration (`Rg`), gyration
+tensor and eigenvalues, shape anisotropy, straightness/tortuosity,
+orientation, winding, and contour mass. Statistics are grouped by network
+status, parent topology, and membership in the largest connected component.
+`Rg` and its tensor are bead-number-weighted over the effective contour.
+
+System-level outputs include snapshot/component validation, mass density,
+velocity-derived temperature when a `Velocities` section is present,
+conversion, junction and defect counts, degree distribution, cycle rank,
+active-strand density, and affine/phantom structural modulus estimates. The
+modulus values are topology-based estimates rather than measured mechanical
+properties. Their temperature defaults to the final temperature in the info
+file and can be overridden with `--modulus-temperature`.
+
+Default outputs in `analysis_<case>/` are:
+
+- `basic_network_report.<case>.txt`;
+- `network_statistics.<case>.tsv`;
+- `strand_properties.<case>.tsv`;
+- `strand_statistics.<case>.tsv`;
+- `strand_histograms.<case>.tsv`;
+- `junction_properties.<case>.tsv`.
+
+`Lpp` is deliberately written as `NaN` with an unavailable status. A final
+snapshot contains no primitive-path contour, and neither `Lc`, `Ree`, nor a
+graph shortest path is a valid substitute. A future validated primitive-path
+reader can populate this field without changing the table schema.
+
+## 3. Distribution and layer dynamics
 
 Static z profiles need only the final snapshot:
 

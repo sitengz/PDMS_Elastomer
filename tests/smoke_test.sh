@@ -369,6 +369,7 @@ awk '
 ' "$full_dir/data.PDMS_elastomer_filler_N8_5wt_film_Lz40"
 
 topology_analyzer="$repo_root/bin/topology_analyzer"
+basic_analyzer="$repo_root/bin/basic_network_analyzer"
 profile_analyzer="$repo_root/bin/network_profile_analyzer"
 
 reacted_copy() {
@@ -434,6 +435,65 @@ awk -v z1_lx="$z1_lx" -v z1_ly="$z1_ly" -v z1_lz="$z1_lz" \
     }
 '
 grep -q $'\t1$' "$ring_analysis/config.ring_bifunctional.Z1.map.tsv"
+
+ring_final_velocities="$ring_bifunctional_dir/data.ring_bifunctional.npt_eq.velocities"
+awk '
+    /^[0-9]+ atoms$/ && NF == 2 { atom_count = $1 }
+    { print }
+    END {
+        print ""
+        print "Velocities"
+        print ""
+        for (id = 1; id <= atom_count; ++id) {
+            vx = id % 2 ? 0.01 : -0.01
+            print id, vx, 0.0, 0.0
+        }
+    }
+' "$ring_final" > "$ring_final_velocities"
+
+basic_analysis="$test_root/basic_analysis"
+"$basic_analyzer" "$ring_final_velocities" \
+    "$ring_bifunctional_dir/ring_bifunctional.info" \
+    --histogram-bins 8 --output-dir "$basic_analysis" >/dev/null
+for output in \
+    "basic_network_report.ring_bifunctional.txt" \
+    "network_statistics.ring_bifunctional.tsv" \
+    "strand_properties.ring_bifunctional.tsv" \
+    "strand_statistics.ring_bifunctional.tsv" \
+    "strand_histograms.ring_bifunctional.tsv" \
+    "junction_properties.ring_bifunctional.tsv"; do
+    test -s "$basic_analysis/$output"
+done
+test "$(wc -l < "$basic_analysis/strand_properties.ring_bifunctional.tsv")" -eq 3
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    {
+        if ($header["status"] != "active" || $header["Ree_A"] <= 0 ||
+            $header["Rg_A"] <= 0 || $header["Lpp_A"] != "nan" ||
+            $header["Lpp_source"] != "not_available_without_primitive_path_analysis")
+            exit 1
+        ++rows
+    }
+    END { exit rows != 2 }
+' "$basic_analysis/strand_properties.ring_bifunctional.tsv"
+awk -F '\t' '
+    $1 == "active" && $2 == "Ree_A" && $3 == 2 && $4 > 0 { ree = 1 }
+    $1 == "active" && $2 == "Rg_A" && $3 == 2 && $4 > 0 { rg = 1 }
+    $1 == "active" && $2 == "Lpp_A" && $3 == 0 && $4 == "nan" { lpp = 1 }
+    END { exit !(ree && rg && lpp) }
+' "$basic_analysis/strand_statistics.ring_bifunctional.tsv"
+awk -F '\t' '
+    $1 == "density" && $2 > 0 { density = 1 }
+    $1 == "velocity_temperature" && $2 > 0 { temperature = 1 }
+    $1 == "active_strands" && $2 == 2 { active = 1 }
+    $1 == "Lpp_available" && $2 == 0 { lpp = 1 }
+    END { exit !(density && temperature && active && lpp) }
+' "$basic_analysis/network_statistics.ring_bifunctional.tsv"
+grep -q 'Lpp: unavailable (NaN)' \
+    "$basic_analysis/basic_network_report.ring_bifunctional.txt"
 
 mapfile -t star_xlink_atoms < <(awk '
     /^Atoms # full$/ { in_atoms = 1; next }

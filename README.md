@@ -260,8 +260,12 @@ architectures to a common effective-strand graph, classify network defects,
 calculate strand conformation and directional periodic-image shortest paths,
 and export native Z1+ input with a companion graph mapping.
 
-The distribution analyzer reports reaction and defect profiles along z and
-can use `dump.msd.lammpstrj` for origin-layer-resolved dynamics. See
+The second-stage basic network analyzer reports per-strand `Ree`, `Rg`,
+contour and shape metrics, grouped distributions, density, conversion,
+connectivity, and structural elasticity estimates. `Lpp` remains explicitly
+unavailable until a validated primitive-path result is supplied. The third
+analyzer reports reaction and defect profiles along z and can use
+`dump.msd.lammpstrj` for origin-layer-resolved dynamics. See
 [`Analysis/README.md`](Analysis/README.md) for commands, definitions, output
 columns, and the film/Z1+ boundary caveat.
 
@@ -278,7 +282,8 @@ columns, and the film/Z1+ boundary caveat.
 - `examples/08_grafted_comb/`: sparse, comb-like grafted strands;
 - `examples/09_grafted_bottlebrush/`: dense bottlebrush strands with a graft on every backbone bead;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
-- `Analysis/`: topology reduction, Z1+ export, z profiles, and layer dynamics;
+- `Analysis/`: topology reduction, static network properties, Z1+ export,
+  z profiles, and layer dynamics;
 - `tests/smoke_test.sh`: generator and analyzer regression checks.
 
 ## References

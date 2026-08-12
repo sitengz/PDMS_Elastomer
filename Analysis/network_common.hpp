@@ -188,6 +188,7 @@ struct ModelInfo {
     std::vector<long long> crosslinker_reactive_bead_sites;
     int crosslink_bond_type = 2;
     double timestep_fs = 5.0;
+    double final_temperature_k = 300.0;
 
     bool periodic_z() const { return geometry == "bulk"; }
 };
@@ -264,6 +265,7 @@ inline ModelInfo parse_model_info(const std::string &path) {
         json_integer_array(crosslinker, "reactive_bead_sites");
     const std::string simulation = json_object_for_key(text, "simulation_template");
     info.timestep_fs = json_number(simulation, "timestep_fs");
+    info.final_temperature_k = json_number(simulation, "final_temperature_K");
     return info;
 }
 
@@ -293,7 +295,10 @@ struct Atom {
     long long id = 0;
     long long molecule = 0;
     int type = 0;
+    double mass = 0.0;
     Vec3 position;
+    Vec3 velocity;
+    bool have_velocity = false;
     std::array<long long, 3> image{{0, 0, 0}};
     bool have_images = false;
 };
@@ -309,12 +314,19 @@ struct DataFile {
     Box box;
     long long declared_atoms = 0;
     long long declared_bonds = 0;
+    long long declared_angles = 0;
+    long long declared_dihedrals = 0;
+    long long velocities_read = 0;
+    double total_mass_g_per_mol = 0.0;
+    std::vector<double> masses;
     std::vector<Atom> atoms;
     std::vector<Bond> bonds;
     std::vector<std::vector<long long>> molecule_atoms;
 };
 
-enum class DataSection { kHeader, kAtoms, kBonds, kOther };
+enum class DataSection {
+    kHeader, kMasses, kAtoms, kVelocities, kBonds, kOther
+};
 
 inline bool section_line(const std::string &line, const std::string &name) {
     return begins_with(line, name) &&
@@ -330,6 +342,8 @@ inline void parse_header_line(const std::string &line, DataFile &data) {
     if (counts >> count >> first) {
         if (first == "atoms") data.declared_atoms = count;
         else if (first == "bonds") data.declared_bonds = count;
+        else if (first == "angles") data.declared_angles = count;
+        else if (first == "dihedrals") data.declared_dihedrals = count;
     }
     double lo = 0.0, hi = 0.0;
     std::string lower, upper;
@@ -358,6 +372,10 @@ inline DataFile parse_data_file(
         ++line_number;
         const std::string clean = trim(line);
         if (clean.empty() || clean.front() == '#') continue;
+        if (section_line(clean, "Masses")) {
+            section = DataSection::kMasses;
+            continue;
+        }
         if (section_line(clean, "Atoms")) {
             if (data.declared_atoms <= 0)
                 throw std::runtime_error("atom count must precede Atoms section");
@@ -369,8 +387,11 @@ inline DataFile parse_data_file(
             section = DataSection::kBonds;
             continue;
         }
-        if (section_line(clean, "Masses") || section_line(clean, "Velocities") ||
-            section_line(clean, "Angles") || section_line(clean, "Dihedrals") ||
+        if (section_line(clean, "Velocities")) {
+            section = DataSection::kVelocities;
+            continue;
+        }
+        if (section_line(clean, "Angles") || section_line(clean, "Dihedrals") ||
             section_line(clean, "Pair Coeffs") || section_line(clean, "Bond Coeffs") ||
             section_line(clean, "Angle Coeffs") || section_line(clean, "Dihedral Coeffs") ||
             section_line(clean, "Impropers")) {
@@ -379,6 +400,18 @@ inline DataFile parse_data_file(
         }
         if (section == DataSection::kHeader) {
             parse_header_line(clean, data);
+        } else if (section == DataSection::kMasses) {
+            int type = 0;
+            double mass = 0.0;
+            std::istringstream fields(clean);
+            if (!(fields >> type >> mass) || type < 1 || mass <= 0.0)
+                throw std::runtime_error(
+                    "invalid mass at line " + std::to_string(line_number));
+            if (data.masses.size() <= static_cast<std::size_t>(type))
+                data.masses.resize(static_cast<std::size_t>(type + 1), 0.0);
+            if (data.masses[static_cast<std::size_t>(type)] != 0.0)
+                throw std::runtime_error("duplicate atom-type mass");
+            data.masses[static_cast<std::size_t>(type)] = mass;
         } else if (section == DataSection::kAtoms) {
             Atom atom;
             double charge = 0.0;
@@ -395,6 +428,21 @@ inline DataFile parse_data_file(
             atom.seen = true;
             data.atoms[static_cast<std::size_t>(atom.id)] = atom;
             data.molecule_atoms[static_cast<std::size_t>(atom.molecule)].push_back(atom.id);
+        } else if (section == DataSection::kVelocities) {
+            long long id = 0;
+            Vec3 velocity;
+            std::istringstream fields(clean);
+            if (!(fields >> id >> velocity.x >> velocity.y >> velocity.z) ||
+                id < 1 || id > data.declared_atoms || data.atoms.empty() ||
+                !data.atoms[static_cast<std::size_t>(id)].seen)
+                throw std::runtime_error(
+                    "invalid velocity at line " + std::to_string(line_number));
+            Atom &atom = data.atoms[static_cast<std::size_t>(id)];
+            if (atom.have_velocity)
+                throw std::runtime_error("duplicate atom velocity");
+            atom.velocity = velocity;
+            atom.have_velocity = true;
+            ++data.velocities_read;
         } else if (section == DataSection::kBonds) {
             Bond bond;
             std::istringstream fields(clean);
@@ -413,6 +461,16 @@ inline DataFile parse_data_file(
     for (long long id = 1; id <= data.declared_atoms; ++id)
         if (!data.atoms[static_cast<std::size_t>(id)].seen)
             throw std::runtime_error("missing atom ID " + std::to_string(id));
+        else {
+            Atom &atom = data.atoms[static_cast<std::size_t>(id)];
+            if (atom.type < 1 ||
+                static_cast<std::size_t>(atom.type) >= data.masses.size() ||
+                data.masses[static_cast<std::size_t>(atom.type)] <= 0.0)
+                throw std::runtime_error("missing mass for atom type " +
+                                         std::to_string(atom.type));
+            atom.mass = data.masses[static_cast<std::size_t>(atom.type)];
+            data.total_mass_g_per_mol += atom.mass;
+        }
     for (auto &atoms : data.molecule_atoms) std::sort(atoms.begin(), atoms.end());
     return data;
 }
