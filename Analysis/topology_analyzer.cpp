@@ -10,7 +10,7 @@ struct Options {
     std::string data_file;
     std::string info_file;
     std::string output_directory;
-    std::string z1_selection = "active";
+    std::string z1_selection = "network";
     double z1_max_bond = 0.0;
     bool z1_scaling_requested = false;
     int image_search_bound = 2;
@@ -28,6 +28,30 @@ struct GraphArc {
     long long neighbor = 0;
     std::array<int, 3> shift{{0, 0, 0}};
     double weight = 0.0;
+};
+
+struct Z1Chain {
+    long long effective_strand_id = 0;
+    long long parent_molecule = 0;
+    std::string parent_topology;
+    std::string status;
+    long long first_node = 0;
+    long long second_node = 0;
+    long long first_atom = 0;
+    long long second_atom = 0;
+    long long effective_contour_beads = 0;
+    long long reacted_site_index = 0;
+    long long next_graft_atom = 0;
+    std::vector<long long> atoms;
+    std::vector<long long> excluded_atoms;
+};
+
+struct Z1Summary {
+    double coordinate_scale = 1.0;
+    long long selected_paths = 0;
+    long long chains_written = 0;
+    long long empty_strands_skipped = 0;
+    long long excluded_contour_occurrences = 0;
 };
 
 std::vector<std::vector<GraphArc>> graph_arcs(
@@ -145,13 +169,163 @@ std::string axis_name(int axis) {
     return axis == 0 ? "x" : axis == 1 ? "y" : "z";
 }
 
-bool select_for_z1(const EffectiveStrand &strand, const std::string &selection) {
-    if (selection == "active") return strand.status == "active";
+bool select_for_z1(
+    const std::string &status, bool parent_reacted,
+    const std::string &selection) {
+    if (selection == "network")
+        return parent_reacted && status != "isolated";
+    if (selection == "active") return status == "active";
     if (selection == "active-and-dangling")
-        return strand.status == "active" || strand.status == "dangling";
-    if (selection == "all-linearizable")
-        return strand.status != "dangling_loop";
+        return parent_reacted && (status == "active" ||
+            status == "dangling" || status == "dangling_loop");
+    if (selection == "all-linearizable") return true;
     throw std::runtime_error("unknown Z1 selection: " + selection);
+}
+
+void append_unique(std::vector<long long> &values, long long value) {
+    if (std::find(values.begin(), values.end(), value) == values.end())
+        values.push_back(value);
+}
+
+Z1Chain z1_chain_metadata(const EffectiveStrand &strand) {
+    Z1Chain chain;
+    chain.effective_strand_id = strand.id;
+    chain.parent_molecule = strand.parent_molecule;
+    chain.parent_topology = strand.parent_topology;
+    chain.status = strand.status;
+    chain.first_node = strand.first_node;
+    chain.second_node = strand.second_node;
+    chain.first_atom = strand.first_atom;
+    chain.second_atom = strand.second_atom;
+    chain.effective_contour_beads =
+        static_cast<long long>(strand.atoms.size());
+    return chain;
+}
+
+Z1Chain z1_chain(
+    const EffectiveStrand &strand, const DataFile &data,
+    const ModelInfo &info) {
+    Z1Chain chain = z1_chain_metadata(strand);
+    if (strand.parent_topology == "ring") {
+        if (!strand.atoms.empty()) {
+            append_unique(chain.excluded_atoms, strand.atoms.front());
+            append_unique(chain.excluded_atoms, strand.atoms.back());
+        }
+        if (strand.atoms.size() > 2)
+            chain.atoms.assign(strand.atoms.begin() + 1, strand.atoms.end() - 1);
+    } else if (strand.parent_topology == "star") {
+        const auto &molecule_atoms = data.molecule_atoms[
+            static_cast<std::size_t>(strand.parent_molecule)];
+        for (long long atom : strand.atoms) {
+            if (local_rank(atom, molecule_atoms) <= info.star_center_count)
+                append_unique(chain.excluded_atoms, atom);
+            else
+                chain.atoms.push_back(atom);
+        }
+    } else {
+        // Linear paths retain their complete reduced contours.
+        chain.atoms = strand.atoms;
+    }
+    return chain;
+}
+
+long long graft_atom_for_site(
+    long long site, const std::vector<long long> &molecule_atoms,
+    const ModelInfo &info) {
+    const long long rank = local_rank(site, molecule_atoms);
+    const long long offset = rank - info.graft_backbone_length;
+    if (info.graft_backbone_length < 1 || info.graft_side_chain_length < 1 ||
+        offset < 1 || offset % info.graft_side_chain_length != 0)
+        throw std::runtime_error(
+            "reacted grafted site is not a generated side-chain end");
+    const long long side = offset / info.graft_side_chain_length - 1;
+    if (side < 0 || side >= info.graft_side_chain_count)
+        throw std::runtime_error("reacted grafted site has invalid side-chain index");
+    const long long graft_rank = 1 + side * (info.graft_spacing + 1);
+    if (graft_rank < 1 || graft_rank > info.graft_backbone_length)
+        throw std::runtime_error("grafted side chain has invalid backbone attachment");
+    return molecule_atoms[static_cast<std::size_t>(graft_rank - 1)];
+}
+
+std::vector<Z1Chain> grafted_z1_chains(
+    const ReducedNetwork &network, const DataFile &data,
+    const ModelInfo &info, const Options &options) {
+    const auto internal = strand_internal_adjacency(data, info);
+    std::map<std::pair<long long, long long>, const EffectiveStrand *> segments;
+    for (const EffectiveStrand &strand : network.strands) {
+        if (strand.parent_topology != "grafted") continue;
+        segments[{strand.first_atom, strand.second_atom}] = &strand;
+    }
+
+    std::vector<Z1Chain> result;
+    const ComponentInfo &component = info.components[kStrand];
+    for (long long molecule = component.molecule_start;
+         molecule > 0 && molecule <= component.molecule_end; ++molecule) {
+        const auto &molecule_atoms = data.molecule_atoms[
+            static_cast<std::size_t>(molecule)];
+        std::vector<long long> reacted_sites;
+        for (const auto &entry : network.network_atom_node) {
+            const long long atom = entry.first;
+            if (data.atoms[static_cast<std::size_t>(atom)].molecule == molecule)
+                reacted_sites.push_back(atom);
+        }
+        std::sort(reacted_sites.begin(), reacted_sites.end(),
+            [&](long long first, long long second) {
+                return graft_atom_for_site(first, molecule_atoms, info) <
+                    graft_atom_for_site(second, molecule_atoms, info);
+            });
+        if (reacted_sites.empty()) continue;
+
+        for (std::size_t site = 0; site < reacted_sites.size(); ++site) {
+            const long long current = reacted_sites[site];
+            const long long current_graft =
+                graft_atom_for_site(current, molecule_atoms, info);
+            Z1Chain chain;
+            if (site + 1 < reacted_sites.size()) {
+                const long long next = reacted_sites[site + 1];
+                const long long next_graft =
+                    graft_atom_for_site(next, molecule_atoms, info);
+                const auto found = segments.find({current, next});
+                if (found == segments.end())
+                    throw std::runtime_error(
+                        "missing reduced grafted segment between ordered reacted sites");
+                chain = z1_chain_metadata(*found->second);
+                chain.reacted_site_index = static_cast<long long>(site + 1);
+                chain.next_graft_atom = next_graft;
+                const std::vector<long long> path =
+                    unique_path(current, next, internal);
+                const auto stop = std::find(path.begin(), path.end(), next_graft);
+                if (stop == path.end() || stop == path.begin())
+                    throw std::runtime_error(
+                        "next grafting point is not internal to grafted path");
+                chain.atoms.assign(path.begin(), stop);
+                chain.excluded_atoms.assign(stop, path.end());
+                chain.first_atom = chain.atoms.front();
+                chain.second_atom = chain.atoms.back();
+            } else {
+                std::vector<long long> path =
+                    unique_path(current, current_graft, internal);
+                chain.parent_molecule = molecule;
+                chain.parent_topology = "grafted";
+                chain.status = "dangling";
+                chain.first_node = network.network_atom_node.at(current);
+                chain.first_atom = current;
+                chain.effective_contour_beads =
+                    static_cast<long long>(path.size());
+                chain.reacted_site_index = static_cast<long long>(site + 1);
+                chain.excluded_atoms.push_back(current_graft);
+                path.pop_back();
+                if (path.empty())
+                    throw std::runtime_error(
+                        "final grafted side chain has no side-chain beads");
+                chain.atoms = path;
+                chain.second_atom = chain.atoms.back();
+            }
+            if (select_for_z1(chain.status, true, options.z1_selection))
+                result.push_back(std::move(chain));
+        }
+    }
+    return result;
 }
 
 void write_strands(
@@ -233,68 +407,123 @@ void write_directional_paths(
 }
 
 double z1_scale(
-    const std::vector<const EffectiveStrand *> &selected,
+    const std::vector<Z1Chain> &selected,
     const DataFile &data, const ModelInfo &info, double target) {
     double maximum = 0.0;
-    for (const EffectiveStrand *strand : selected) {
-        const auto positions = unwrapped_path(strand->atoms, data, info);
+    for (const Z1Chain &chain : selected) {
+        const auto positions = unwrapped_path(chain.atoms, data, info);
         for (std::size_t i = 1; i < positions.size(); ++i)
             maximum = std::max(maximum, norm(positions[i] - positions[i - 1]));
     }
     return maximum > target ? target / maximum : 1.0;
 }
 
-void write_z1(
+Z1Summary write_z1(
     const std::filesystem::path &config_path,
     const std::filesystem::path &map_path,
     const ReducedNetwork &network, const DataFile &data,
-    const ModelInfo &info, const Options &options,
-    double &coordinate_scale, long long &chain_count) {
-    std::vector<const EffectiveStrand *> selected;
-    for (const EffectiveStrand &strand : network.strands)
-        if (select_for_z1(strand, options.z1_selection)) selected.push_back(&strand);
-    chain_count = static_cast<long long>(selected.size());
-    coordinate_scale = options.z1_scaling_requested
+    const ModelInfo &info, const Options &options) {
+    Z1Summary summary;
+    std::set<long long> reacted_parents;
+    for (const ParentRecord &parent : network.parents)
+        if (parent.reacted_sites > 0) reacted_parents.insert(parent.molecule);
+    std::vector<Z1Chain> selected;
+    if (info.strand_topology == "grafted") {
+        selected = grafted_z1_chains(network, data, info, options);
+        summary.selected_paths = static_cast<long long>(selected.size());
+        for (const Z1Chain &chain : selected)
+            summary.excluded_contour_occurrences +=
+                static_cast<long long>(chain.excluded_atoms.size());
+    } else {
+        for (const EffectiveStrand &strand : network.strands) {
+            const bool parent_reacted =
+                reacted_parents.count(strand.parent_molecule) != 0;
+            if (!select_for_z1(
+                    strand.status, parent_reacted, options.z1_selection))
+                continue;
+            ++summary.selected_paths;
+            Z1Chain chain = z1_chain(strand, data, info);
+            summary.excluded_contour_occurrences +=
+                static_cast<long long>(strand.atoms.size() - chain.atoms.size());
+            if (chain.atoms.empty()) {
+                ++summary.empty_strands_skipped;
+                continue;
+            }
+            selected.push_back(std::move(chain));
+        }
+    }
+    summary.chains_written = static_cast<long long>(selected.size());
+
+    std::map<long long, long long> atom_owner;
+    for (std::size_t chain = 0; chain < selected.size(); ++chain) {
+        for (long long atom : selected[chain].atoms) {
+            const auto inserted = atom_owner.emplace(
+                atom, static_cast<long long>(chain + 1));
+            if (!inserted.second)
+                throw std::runtime_error(
+                    "Z1 bead overlap remains between chains " +
+                    std::to_string(inserted.first->second) + " and " +
+                    std::to_string(chain + 1) + " at atom " +
+                    std::to_string(atom));
+        }
+    }
+
+    summary.coordinate_scale = options.z1_scaling_requested
         ? z1_scale(selected, data, info, options.z1_max_bond) : 1.0;
     std::ofstream config(config_path);
     if (!config) throw std::runtime_error("cannot write " + config_path.string());
     config << selected.size() << '\n' << std::setprecision(15)
-           << coordinate_scale * data.box.lx() << ' '
-           << coordinate_scale * data.box.ly() << ' '
-           << coordinate_scale * data.box.lz() << '\n';
+           << summary.coordinate_scale * data.box.lx() << ' '
+           << summary.coordinate_scale * data.box.ly() << ' '
+           << summary.coordinate_scale * data.box.lz() << '\n';
     for (std::size_t i = 0; i < selected.size(); ++i) {
         if (i) config << ' ';
-        config << selected[i]->atoms.size();
+        config << selected[i].atoms.size();
     }
     config << '\n';
-    for (const EffectiveStrand *strand : selected) {
-        for (const Vec3 &position : unwrapped_path(strand->atoms, data, info))
-            config << coordinate_scale * position.x << ' '
-                   << coordinate_scale * position.y << ' '
-                   << coordinate_scale * position.z << '\n';
+    for (const Z1Chain &chain : selected) {
+        for (const Vec3 &position : unwrapped_path(chain.atoms, data, info))
+            config << summary.coordinate_scale * position.x << ' '
+                   << summary.coordinate_scale * position.y << ' '
+                   << summary.coordinate_scale * position.z << '\n';
     }
 
     std::ofstream mapping(map_path);
     if (!mapping) throw std::runtime_error("cannot write " + map_path.string());
     mapping << "z1_chain_id\teffective_strand_id\tparent_molecule"
             << "\tparent_topology\tstatus\tfirst_node\tsecond_node"
-            << "\tfirst_atom\tsecond_atom\tcontour_beads\tcoordinate_scale\n";
+            << "\tfirst_atom\tsecond_atom\teffective_contour_beads\tz1_beads"
+            << "\treacted_site_index\tnext_graft_atom\texcluded_atom_ids"
+            << "\tz1_atom_ids\tcoordinate_scale\n";
     for (std::size_t i = 0; i < selected.size(); ++i) {
-        const EffectiveStrand &strand = *selected[i];
-        mapping << i + 1 << '\t' << strand.id << '\t'
-                << strand.parent_molecule << '\t' << strand.parent_topology
-                << '\t' << strand.status << '\t' << strand.first_node << '\t'
-                << strand.second_node << '\t' << strand.first_atom << '\t'
-                << strand.second_atom << '\t' << strand.atoms.size() << '\t'
-                << std::setprecision(15) << coordinate_scale << '\n';
+        const Z1Chain &chain = selected[i];
+        mapping << i + 1 << '\t' << chain.effective_strand_id << '\t'
+                << chain.parent_molecule << '\t' << chain.parent_topology
+                << '\t' << chain.status << '\t' << chain.first_node << '\t'
+                << chain.second_node << '\t' << chain.first_atom << '\t'
+                << chain.second_atom << '\t' << chain.effective_contour_beads
+                << '\t' << chain.atoms.size() << '\t'
+                << chain.reacted_site_index << '\t' << chain.next_graft_atom
+                << '\t';
+        for (std::size_t atom = 0; atom < chain.excluded_atoms.size(); ++atom) {
+            if (atom) mapping << ',';
+            mapping << chain.excluded_atoms[atom];
+        }
+        mapping << '\t';
+        for (std::size_t atom = 0; atom < chain.atoms.size(); ++atom) {
+            if (atom) mapping << ',';
+            mapping << chain.atoms[atom];
+        }
+        mapping << '\t' << std::setprecision(15) << summary.coordinate_scale << '\n';
     }
+    return summary;
 }
 
 void write_report(
     const std::filesystem::path &path, const ModelInfo &info,
     const DataFile &data, const ReducedNetwork &network,
     const std::vector<DirectionalPath> &paths, const Options &options,
-    double coordinate_scale, long long z1_chains) {
+    const Z1Summary &z1) {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("cannot write " + path.string());
     std::map<std::string, long long> status_counts;
@@ -390,13 +619,20 @@ void write_report(
 
     out << "\nZ1+ export\n"
         << "  selection: " << options.z1_selection << "\n"
-        << "  chains written: " << z1_chains << "\n"
-        << "  coordinate scale: " << coordinate_scale << "\n";
+        << "  candidate paths selected: " << z1.selected_paths << "\n"
+        << "  chains written: " << z1.chains_written << "\n"
+        << "  empty trimmed strands skipped: " << z1.empty_strands_skipped << "\n"
+        << "  contour bead occurrences excluded: "
+        << z1.excluded_contour_occurrences << "\n"
+        << "  coordinate scale: " << z1.coordinate_scale << "\n";
     if (options.z1_scaling_requested)
         out << "  scaled maximum bond target: " << options.z1_max_bond << "\n";
     else
         out << "  scaling: disabled; physical coordinates and full box lengths preserved\n";
     out << "  crosslinker geometry and reaction bonds are not part of chain contours\n"
+        << "  ring reaction-site endpoints and star center beads are excluded\n"
+        << "  dangling, dangling-loop, and self-loop paths are retained by the network selection\n"
+        << "  grafted contours are partitioned by ordered reacted grafts without shared beads\n"
         << "  graph connectivity is retained only in the companion mapping table\n";
     if (!info.periodic_z())
         out << "  WARNING: native three-line Z1 format does not encode p p f boundaries; validate confinement/surface handling before film PPA\n";
@@ -409,7 +645,8 @@ void print_help(const char *program) {
         << "Usage: " << program << " <case>.npt_eq <case>.info [options]\n\n"
         << "Options:\n"
         << "  --output-dir PATH          output directory (default: analysis_<case>)\n"
-        << "  --z1-selection MODE        active, active-and-dangling, or all-linearizable\n"
+        << "  --z1-selection MODE        network (default), active, active-and-dangling,\n"
+        << "                             or all-linearizable\n"
         << "  --z1-max-bond X            opt-in uniform scaling for PPA bond limit\n"
         << "  --image-search-bound N     lifted-cell search bound (default 2)\n"
         << "  --skip-self-paths          omit directional periodic-image searches\n"
@@ -446,7 +683,8 @@ Options parse_options(int argc, char **argv) {
         throw std::runtime_error("--z1-max-bond must be positive");
     if (options.image_search_bound < 1 || options.image_search_bound > 4)
         throw std::runtime_error("--image-search-bound must be between 1 and 4");
-    if (options.z1_selection != "active" &&
+    if (options.z1_selection != "network" &&
+        options.z1_selection != "active" &&
         options.z1_selection != "active-and-dangling" &&
         options.z1_selection != "all-linearizable")
         throw std::runtime_error("invalid --z1-selection");
@@ -474,13 +712,12 @@ int main(int argc, char **argv) {
         write_parents(directory / ("parent_molecules." + name + ".tsv"), network);
         write_directional_paths(
             directory / ("directional_self_paths." + name + ".tsv"), paths);
-        double scale = 1.0;
-        long long z1_chains = 0;
-        write_z1(directory / ("config." + name + ".Z1"),
-                 directory / ("config." + name + ".Z1.map.tsv"),
-                 network, data, info, options, scale, z1_chains);
+        const Z1Summary z1 = write_z1(
+            directory / ("config." + name + ".Z1"),
+            directory / ("config." + name + ".Z1.map.tsv"),
+            network, data, info, options);
         write_report(directory / ("topology_report." + name + ".txt"),
-                     info, data, network, paths, options, scale, z1_chains);
+                     info, data, network, paths, options, z1);
         std::cout << "Topology analysis written to " << directory.string() << '\n';
         return 0;
     } catch (const std::exception &error) {

@@ -260,6 +260,12 @@ architectures to a common effective-strand graph, classify network defects,
 calculate strand conformation and directional periodic-image shortest paths,
 and export native Z1+ input with a companion graph mapping.
 
+The Z1+ export keeps network dangling and self-loop paths by default. It
+removes shared reaction-site beads from ring arcs and shared center beads from
+star arms. Grafted paths are partitioned in reacted-graft order: each path
+contains one functional side chain and the following backbone interval, while
+the last path contains only the final side-chain beads.
+
 The second-stage basic network analyzer reports per-strand `Ree`, `Rg`,
 contour and shape metrics, grouped distributions, density, conversion,
 connectivity, and structural elasticity estimates. `Lpp` remains explicitly
