@@ -1,0 +1,22 @@
+# Four-functional bottlebrushes
+
+This production case uses 750 dense 160-bead bottlebrush precursors. Every
+bead of the 32-bead backbone carries a four-bead side chain. Four evenly
+distributed side-chain ends are functional; the other 28 side chains and both
+backbone ends are neutral by design.
+
+## Matched controls
+
+- 3,000 precursor functional groups;
+- 750 four-functional, 32-bead crosslinkers (3,000 crosslinker sites);
+- `1:1` functional-group stoichiometry;
+- 95% target conversion;
+- no moderator or filler;
+- 144,000 total beads;
+- common density, thermal history, crosslink-site seed, and placement seed.
+
+## Run order
+
+Run `bulk/`, obtain its mean effective-strand `Ree`, and supply that value
+as `BULK_REE_ANGSTROM` to the three film runners. Every geometry subfolder
+contains its own configuration, runner, documentation, and output ignore rule.
