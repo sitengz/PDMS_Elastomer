@@ -127,6 +127,13 @@ grep -q '^minimize        1.0e-4 1.0e-4 1000 10000$' \
 grep -q '^reset_timestep  0$' "$base_dir/in.PDMS_elastomer"
 grep -q '^velocity        all create 800.0 5489 mom yes rot yes dist gaussian$' \
     "$base_dir/in.PDMS_elastomer"
+if grep -Eq '^(dump|dump_modify|undump) +traj([[:space:]]|$)' \
+    "$base_dir/in.PDMS_elastomer"; then
+    echo "initial trajectory dump unexpectedly generated" >&2
+    exit 1
+fi
+grep -q '^dump            msd all custom 1000 dump.msd.lammpstrj' \
+    "$base_dir/in.PDMS_elastomer"
 for generated_input in \
     "$base_dir/in.PDMS_elastomer" \
     "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40" \

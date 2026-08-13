@@ -2002,9 +2002,6 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
     out << "reset_timestep  0\n"
         << "neigh_modify    delay 5 every 1 check yes\n\n"
         << "restart         100000 restart." << suffix << ".1 restart." << suffix << ".2\n"
-        << "dump            traj all custom 100000 dump." << suffix
-        << ".lammpstrj id mol type q x y z ix iy iz\n"
-        << "dump_modify     traj format line \"%d %d %d %.1f %.3f %.3f %.3f %d %d %d\" sort id\n"
         << "velocity        all create 800.0 " << s.seed
         << " mom yes rot yes dist gaussian\n\n"
         << "# 800 K relaxation\n"
@@ -2137,7 +2134,6 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << "write_data      data." << suffix << ".npt_eq nocoeff\n\n"
         << "# 1M-step, 300 K NVT trajectory for MSD analysis\n"
         << "unfix           integrate\n"
-        << "undump          traj\n"
         << "reset_timestep  0\n\n"
         << "dump            msd all custom " << kMsdDumpEverySteps
         << " dump.msd.lammpstrj id mol type x y z ix iy iz\n"
