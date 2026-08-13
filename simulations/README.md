@@ -7,15 +7,18 @@ define the production cases intended for the paper.
 
 ## Controlled composition
 
-Every case contains 750 four-functional, 32-bead crosslinkers and 3,000
-functional groups on each stoichiometric side. All systems start from the
-common placement density `0.05 g/cm^3`, target `0.8 g/cm^3` and 95%
+Cases `01`--`05` contain 750 four-functional, 32-bead crosslinkers and
+3,000 functional groups on each stoichiometric side. Case `00` doubles the
+linear-chain population while halving its contour length, giving 1,500
+crosslinkers and 6,000 functional groups on each side. All systems start from
+the common placement density `0.05 g/cm^3`, target `0.8 g/cm^3` and 95%
 conversion, and contain no moderator or filler. The lower placement density is
 required for the 160-bead rings and dense bottlebrushes to generate without
 overlap; reaching 95% before compression must be confirmed in the bulk pilots.
 
 | Case | Precursor population | Precursor beads | Total beads |
 |:--|:--|--:|--:|
+| `00_linear_40_high_xlink` | 3,000 linear 40-bead chains, functionality 2 | 120,000 | 168,000 |
 | `01_linear_reference` | 1,500 linear chains, functionality 2 | 120,000 | 144,000 |
 | `02_ring_4functional` | 750 rings, functionality 4 | 120,000 | 144,000 |
 | `03_star_4arm` | 750 equal four-arm stars | 120,750 | 144,750 |
@@ -54,7 +57,7 @@ missing, so no unresolved placeholder can silently become a production case.
 
 ## Count and statistical scope
 
-The matrix contains five bulk and fifteen film simulations. It uses one
+The matrix contains six bulk and eighteen film simulations. It uses one
 realization per state point. The large number of precursors provides strong
 within-system structural sampling, but one realization does not estimate
 between-realization uncertainty. If two architectures differ only weakly in

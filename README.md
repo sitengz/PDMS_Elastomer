@@ -334,7 +334,7 @@ columns, and the film/Z1+ boundary caveat.
 - `examples/08_grafted_comb/`: sparse, comb-like grafted strands;
 - `examples/09_grafted_bottlebrush/`: dense bottlebrush strands with a graft on every backbone bead;
 - `examples/10_default_film/`: film counterpart of the default linear sample, with a thickness placeholder;
-- `simulations/`: five-architecture production matrix containing bulk and
+- `simulations/`: six-case production matrix containing bulk and
   `2Ree`, `4Ree`, and `8Ree` confined-film cases for the manuscript study;
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: topology reduction, static network properties, Z1+ export,
