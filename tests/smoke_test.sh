@@ -120,8 +120,31 @@ check_data "$grafted_bottlebrush_dir/data.grafted_bottlebrush"
 
 grep -q 'prob 0.10000000' "$base_dir/in.PDMS_elastomer"
 grep -q '^comm_modify     cutoff 25$' "$base_dir/in.PDMS_elastomer"
+grep -q '^min_style       cg$' "$base_dir/in.PDMS_elastomer"
+grep -q '^min_modify      dmax 0.1 line backtrack$' "$base_dir/in.PDMS_elastomer"
+grep -q '^minimize        1.0e-4 1.0e-4 1000 10000$' \
+    "$base_dir/in.PDMS_elastomer"
+grep -q '^reset_timestep  0$' "$base_dir/in.PDMS_elastomer"
 grep -q '^velocity        all create 800.0 5489 mom yes rot yes dist gaussian$' \
     "$base_dir/in.PDMS_elastomer"
+for generated_input in \
+    "$base_dir/in.PDMS_elastomer" \
+    "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40" \
+    "$controlled_bulk_dir/in.controlled_bulk" \
+    "$ring_bifunctional_dir/in.ring_bifunctional" \
+    "$star_8arm_dir/in.star_8arm" \
+    "$grafted_comb_dir/in.grafted_comb" \
+    "$grafted_bottlebrush_dir/in.grafted_bottlebrush"
+do
+    test "$(grep -c '^minimize        1.0e-4 1.0e-4 1000 10000$' \
+        "$generated_input")" -eq 1
+done
+awk '
+    /^read_data/ { read_data = NR }
+    /^minimize/ { minimize = NR }
+    /^velocity/ { velocity = NR }
+    END { exit !(read_data < minimize && minimize < velocity) }
+' "$grafted_bottlebrush_dir/in.grafted_bottlebrush"
 if grep -q 'conversion_halt' "$base_dir/in.PDMS_elastomer"; then
     echo "default workflow unexpectedly enabled conversion control" >&2
     exit 1
@@ -179,6 +202,14 @@ grep -q '"maximum_bond_creation_steps": 10000000' \
 grep -q '"possible_final_step_overshoot": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
 test "$(grep -c 'wall/lj126' "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40")" -eq 4
+test "$(grep -c '^fix_modify      zlo_wall energy yes$' \
+    "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40")" -eq 1
+test "$(grep -c '^fix_modify      zhi_wall energy yes$' \
+    "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40")" -eq 1
+test "$(grep -c '^fix_modify      zlo_wall energy no$' \
+    "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40")" -eq 1
+test "$(grep -c '^fix_modify      zhi_wall energy no$' \
+    "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40")" -eq 1
 grep -q '^boundary        p p f$' \
     "$full_dir/in.PDMS_elastomer_filler_N8_5wt_film_H40"
 grep -q '"film_thickness_source": "requested nominal wall-free thickness at 300 K"' \
@@ -223,6 +254,13 @@ grep -q '"expected_frames": 1001' "$base_dir/PDMS_elastomer.info"
 grep -q '"initial_velocity_seed": 5489' "$base_dir/PDMS_elastomer.info"
 grep -q '"initial_velocity_temperature_K": 800.0' \
     "$base_dir/PDMS_elastomer.info"
+grep -q '"initial_minimization": {' "$base_dir/PDMS_elastomer.info"
+grep -q '"maximum_atom_displacement_per_iteration_angstrom": 0.1' \
+    "$base_dir/PDMS_elastomer.info"
+grep -q '"film_wall_energy_included": false' \
+    "$base_dir/PDMS_elastomer.info"
+grep -q '"film_wall_energy_included": true' \
+    "$full_dir/PDMS_elastomer_filler_N8_5wt_film_H40.info"
 grep -q '"hard_maximum_beads": null' "$base_dir/PDMS_elastomer.info"
 grep -q '"recommended_maximum_beads": 150000' "$base_dir/PDMS_elastomer.info"
 grep -q '"exceeds_recommended_maximum": false' "$base_dir/PDMS_elastomer.info"

@@ -252,11 +252,15 @@ while avoiding the other components and box boundaries.
 
 ## Simulation template
 
-The generated LAMMPS input first assigns all beads Gaussian velocities at
-800 K using the reproducible `--seed`, with net linear and angular momentum
-removed. Without a conversion target, it retains the original time-controlled
-workflow: relax, compress while crosslinking, continue crosslinking for a fixed
-time, cool to 300 K, and equilibrate.
+The generated LAMMPS input first minimizes the initial coordinates at fixed box
+dimensions using the 800 K force field. The conjugate-gradient minimizer uses
+a conservative 0.1 A maximum bead displacement per iteration to relax severe
+initial overlaps; film-wall energies are included during this stage. It then
+assigns all beads Gaussian velocities at 800 K using the reproducible `--seed`,
+with net linear and angular momentum removed. Without a conversion target, it
+retains the original time-controlled workflow: relax, compress while
+crosslinking, continue crosslinking for a fixed time, cool to 300 K, and
+equilibrate.
 
 Supplying `--target-conversion X` enables conversion-controlled curing. The
 generator calculates

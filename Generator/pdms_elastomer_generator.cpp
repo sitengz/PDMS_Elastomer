@@ -1973,27 +1973,39 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
     pdms_filler::write_pair_matrix(out, 800.0, true);
     out << "\n"
         << "neighbor        2 bin\n"
-        << "neigh_modify    delay 5 every 1\n"
+        << "neigh_modify    delay 0 every 1 check yes\n"
         << "timestep        5\n"
         << "thermo          1000\n"
         << "thermo_style    custom step temp density lx ly lz pxx pyy pzz"
-        << " etotal epair ebond eangle edihed\n"
-        << "restart         100000 restart." << suffix << ".1 restart." << suffix << ".2\n"
-        << "dump            traj all custom 100000 dump." << suffix
-        << ".lammpstrj id mol type q x y z ix iy iz\n"
-        << "dump_modify     traj format line \"%d %d %d %.1f %.3f %.3f %.3f %d %d %d\" sort id\n"
-        << "velocity        all create 800.0 " << s.seed
-        << " mom yes rot yes dist gaussian\n\n";
+        << " etotal epair ebond eangle edihed\n\n";
 
     if (film) {
         out << "# Separate repulsive fixes for the lower and upper z box edges.\n"
             << "fix             zlo_wall all wall/lj126 zlo EDGE "
             << hot.epsilon << ' ' << hot.sigma << ' ' << hot.cutoff << " units box\n"
             << "fix             zhi_wall all wall/lj126 zhi EDGE "
-            << hot.epsilon << ' ' << hot.sigma << ' ' << hot.cutoff << " units box\n\n";
+            << hot.epsilon << ' ' << hot.sigma << ' ' << hot.cutoff << " units box\n"
+            << "fix_modify      zlo_wall energy yes\n"
+            << "fix_modify      zhi_wall energy yes\n\n";
     }
 
-    out << "# 800 K relaxation\n"
+    out << "# Relax initial overlaps before assigning 800 K velocities.\n"
+        << "min_style       cg\n"
+        << "min_modify      dmax 0.1 line backtrack\n"
+        << "minimize        1.0e-4 1.0e-4 1000 10000\n";
+    if (film) {
+        out << "fix_modify      zlo_wall energy no\n"
+            << "fix_modify      zhi_wall energy no\n";
+    }
+    out << "reset_timestep  0\n"
+        << "neigh_modify    delay 5 every 1 check yes\n\n"
+        << "restart         100000 restart." << suffix << ".1 restart." << suffix << ".2\n"
+        << "dump            traj all custom 100000 dump." << suffix
+        << ".lammpstrj id mol type q x y z ix iy iz\n"
+        << "dump_modify     traj format line \"%d %d %d %.1f %.3f %.3f %.3f %d %d %d\" sort id\n"
+        << "velocity        all create 800.0 " << s.seed
+        << " mom yes rot yes dist gaussian\n\n"
+        << "# 800 K relaxation\n"
         << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
         << "run             1000000\n"
         << "write_data      data." << suffix << ".rep_800 nocoeff\n\n"
@@ -2534,7 +2546,19 @@ void write_info(const Settings& s, const System& sys, const Box& box,
             << "      \"possible_final_step_overshoot\": true\n"
             << "    },\n";
     }
-    out << "    \"target_compressed_density_g_per_cm3\": " << s.target_density << ",\n"
+    out << "    \"initial_minimization\": {\n"
+        << "      \"enabled\": true,\n"
+        << "      \"style\": \"cg\",\n"
+        << "      \"energy_tolerance\": 1.0e-4,\n"
+        << "      \"force_tolerance_kcal_per_mol_angstrom\": 1.0e-4,\n"
+        << "      \"maximum_iterations\": 1000,\n"
+        << "      \"maximum_force_evaluations\": 10000,\n"
+        << "      \"maximum_atom_displacement_per_iteration_angstrom\": 0.1,\n"
+        << "      \"line_search\": \"backtrack\",\n"
+        << "      \"film_wall_energy_included\": "
+        << (s.thickness > 0.0 ? "true" : "false") << "\n"
+        << "    },\n"
+        << "    \"target_compressed_density_g_per_cm3\": " << s.target_density << ",\n"
         << "    \"target_density_definition\": \""
         << (s.thickness > 0.0 ?
             "mass / nominal wall-free material volume" : "mass / box volume")
