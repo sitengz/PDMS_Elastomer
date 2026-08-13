@@ -155,7 +155,7 @@ grep -q '^variable        stoichiometric_maximum_bonds equal 12$' \
     "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 11 error continue$' \
     "$controlled_bulk_dir/in.controlled_bulk"
-grep -q '^run             10000000$' \
+grep -q '^run             5000000$' \
     "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '^variable        target_new_bonds equal 22$' \
     "$controlled_film_dir/in.controlled_film"
@@ -163,17 +163,24 @@ grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 22 e
     "$controlled_film_dir/in.controlled_film"
 awk '
     /fix             xlink/ && !xlink { xlink = NR }
-    /fix             conversion_halt/ && !halt { halt = NR }
     /fix             compress/ && !compress { compress = NR }
+    /unfix           compress/ && !unfix_compress { unfix_compress = NR }
+    /fix             conversion_halt/ && !halt { halt = NR }
     /unfix           conversion_halt/ && !unfix_halt { unfix_halt = NR }
     /unfix           xlink/ && !unfix_xlink { unfix_xlink = NR }
+    /# Equilibrate the cured network at 800 K/ { post_cure = NR }
+    /reset_timestep  0/ && post_cure && NR > post_cure && !post_cure_reset {
+        post_cure_reset = NR
+    }
     /thermo_style    custom step temp density lx ly lz pxx pyy pzz/ &&
         unfix_xlink && NR > unfix_xlink && !thermo_reset { thermo_reset = NR }
     /# Cool from 800 K to 300 K/ { cool = NR }
     END {
-        exit !(xlink < halt && halt < unfix_halt &&
+        exit !(xlink < compress && compress < unfix_compress &&
+               unfix_compress < halt && halt < unfix_halt &&
                unfix_halt < unfix_xlink && unfix_xlink < thermo_reset &&
-               thermo_reset < compress && compress < cool)
+               thermo_reset < post_cure && post_cure < post_cure_reset &&
+               post_cure_reset < cool)
     }
 ' "$controlled_bulk_dir/in.controlled_bulk"
 test "$(grep -c '^unfix           conversion_halt$' \
@@ -193,11 +200,13 @@ grep -q '"stoichiometric_maximum_new_bonds": 12' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"target_new_bonds": 11' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"crosslinking_starts_before_compression": true' \
+grep -q '"crosslinking_active_during_compression": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"crosslinking_disabled_before_compression": true' \
+grep -q '"target_density_reached_before_conversion_halt": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"maximum_bond_creation_steps": 10000000' \
+grep -q '"maximum_post_compression_curing_steps": 5000000' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"post_cure_800K_equilibration_steps": 1000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"possible_final_step_overshoot": true' \
     "$controlled_bulk_dir/controlled_bulk.info"

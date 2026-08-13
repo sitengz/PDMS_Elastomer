@@ -31,7 +31,9 @@ constexpr double kModeratorZLowerFraction = 0.28;
 constexpr double kModeratorZUpperFraction = 0.38;
 constexpr long long kMsdProductionSteps = 1000000;
 constexpr int kMsdDumpEverySteps = 1000;
-constexpr long long kConversionControlledMaximumSteps = 10000000;
+constexpr long long kControlledCompressionSteps = 1000000;
+constexpr long long kConversionControlledHoldMaximumSteps = 5000000;
+constexpr long long kControlledPostCureEquilibrationSteps = 1000000;
 constexpr long long kRecommendedTotalBeads = 150000;
 constexpr long long kMsdExpectedFrames =
     kMsdProductionSteps / kMsdDumpEverySteps + 1;
@@ -2012,7 +2014,7 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
         << "unfix           integrate\n\n";
 
     if (controlled_conversion) {
-        out << "# Conversion-controlled curing before compression\n"
+        out << "# Compress to the target density with crosslinking active\n"
             << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
             << "fix             xlink all bond/create 1 2 3 " << hot.cutoff
             << " 2 iparam 1 1 jparam 1 1 prob "
@@ -2024,9 +2026,16 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
             << "variable        conversion_percent equal 100.0*v_created_new_bonds/v_stoichiometric_maximum_bonds\n"
             << "thermo_style    custom step temp density etotal epair ebond eangle"
             << " edihed f_xlink[1] f_xlink[2] v_conversion_percent bonds\n"
+            << "fix             compress all deform 1 x scale " << compression_scale
+            << " y scale " << compression_scale;
+        if (!film) out << " z scale " << compression_scale;
+        out << " units box\n"
+            << "run             " << kControlledCompressionSteps << "\n"
+            << "unfix           compress\n\n"
+            << "# Cure at the target density until conversion is reached or 5M steps elapse\n"
             << "fix             conversion_halt all halt 1 v_created_new_bonds >= "
             << requested_new_bonds << " error continue\n"
-            << "run             " << kConversionControlledMaximumSteps << "\n"
+            << "run             " << kConversionControlledHoldMaximumSteps << "\n"
             << "unfix           conversion_halt\n"
             << "print           \"Conversion-controlled curing ended with "
                "$(f_xlink[2]:%.0f) new bonds; target "
@@ -2038,14 +2047,10 @@ void write_lammps_input(const Settings& s, const OutputFiles& files) {
             << "variable        target_new_bonds delete\n\n"
             << "thermo_style    custom step temp density lx ly lz pxx pyy pzz"
             << " etotal epair ebond eangle edihed\n\n"
-            << "# Compress the cured network without further bond creation\n"
-            << "fix             compress all deform 1 x scale " << compression_scale
-            << " y scale " << compression_scale;
-        if (!film) out << " z scale " << compression_scale;
-        out << " units box\n"
-            << "run             1000000\n"
-            << "unfix           compress\n"
-            << "unfix           integrate\n";
+            << "# Equilibrate the cured network at 800 K without further reactions\n"
+            << "run             " << kControlledPostCureEquilibrationSteps << "\n"
+            << "unfix           integrate\n"
+            << "reset_timestep  0\n";
     } else if (film) {
         out << "# Lateral compression at fixed box Lz and nominal wall-free film thickness\n"
             << "fix             integrate all nvt temp 800.0 800.0 50.0\n"
@@ -2538,11 +2543,15 @@ void write_info(const Settings& s, const System& sys, const Box& box,
             << "      \"target_new_bonds\": " << requested_new_bonds << ",\n"
             << "      \"integer_rounding\": \"floor\",\n"
             << "      \"controller\": \"fix bond/create cumulative count plus fix halt\",\n"
-            << "      \"crosslinking_starts_before_compression\": true,\n"
-            << "      \"crosslinking_disabled_before_compression\": true,\n"
+            << "      \"crosslinking_active_during_compression\": true,\n"
+            << "      \"compression_steps\": " << kControlledCompressionSteps << ",\n"
+            << "      \"target_density_reached_before_conversion_halt\": true,\n"
+            << "      \"conversion_halt_stage\": \"fixed-density 800 K hold after compression\",\n"
             << "      \"halt_check_every_steps\": 1,\n"
-            << "      \"maximum_bond_creation_steps\": "
-            << kConversionControlledMaximumSteps << ",\n"
+            << "      \"maximum_post_compression_curing_steps\": "
+            << kConversionControlledHoldMaximumSteps << ",\n"
+            << "      \"post_cure_800K_equilibration_steps\": "
+            << kControlledPostCureEquilibrationSteps << ",\n"
             << "      \"possible_final_step_overshoot\": true\n"
             << "    },\n";
     }
@@ -2583,14 +2592,15 @@ void write_info(const Settings& s, const System& sys, const Box& box,
         << ", \"cutoff\": " << cold.cutoff << "},\n"
         << "    \"timestep_fs\": 5.0,\n"
         << "    \"equilibration_run_steps\": "
-        << (controlled_conversion ? 14000000LL : 7000000LL) << ",\n"
+        << (controlled_conversion ? 10000000LL : 7000000LL) << ",\n"
         << "    \"total_run_steps\": "
-        << (controlled_conversion ? 15000000LL : 8000000LL) << ",\n";
+        << (controlled_conversion ? 11000000LL : 8000000LL) << ",\n";
     if (controlled_conversion)
         out << "    \"run_steps_are_upper_bounds\": true,\n";
     out << "    \"bond_creation_active_steps\": "
         << (controlled_conversion ?
-            kConversionControlledMaximumSteps : 4000000LL)
+            kControlledCompressionSteps + kConversionControlledHoldMaximumSteps :
+            4000000LL)
         << ",\n"
         << "    \"bond_creation_probability\": "
         << s.crosslink_probability << ",\n"

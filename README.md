@@ -273,19 +273,23 @@ target_new_bonds  = floor(X/100 * maximum_new_bonds)
 
 Moderator groups remain extra and are excluded from both stoichiometry and
 this target. At 800 K, `fix bond/create` and its conversion counter are enabled
-before compression begins. A single `fix halt` condition checks the cumulative
-new-bond count every timestep during a curing run of at most 10,000,000 steps.
-When the target is detected, that run terminates; the halt and bond-creation
-fixes are each removed exactly once. The cured network is then compressed
-without further reactions and proceeds directly to cooling. The same setting
-can be written in a config file as `target_conversion = 95`.
+before a 1,000,000-step compression to the target density, and crosslinking
+remains active throughout compression. At the final dimensions, a `fix halt`
+condition checks the cumulative new-bond count every timestep during a curing
+hold of at most 5,000,000 additional steps. When the target is detected, that
+hold ends and both the halt and bond-creation fixes are removed. The cured
+network then equilibrates for 1,000,000 steps at 800 K without further
+reactions, resets the timestep to zero, and proceeds to the parameter-change
+and cooling stages. The same setting can be written in a config file as
+`target_conversion = 95`.
 
 Because `fix bond/create` may form several independent bonds on its final
-timestep, the realized count can exceed the target slightly. The 10,000,000-
-step run is an upper bound rather than a guarantee: if geometric constraints
-produce a plateau below the requested conversion, curing ends at that limit.
-The `.info` file records the target basis, integer bond target, upper bound,
-and possible final-step overshoot.
+timestep, the realized count can exceed the target slightly. The 5,000,000-step
+fixed-density curing hold is an upper bound rather than a guarantee: if
+geometric constraints produce a plateau below the requested conversion, curing
+ends at that limit. The `.info` file records the target basis, compression and
+curing schedule, integer bond target, upper bounds, and possible final-step
+overshoot.
 
 Every workflow finishes by writing an independent 1,000,000-step NVT
 trajectory for MSD analysis.
