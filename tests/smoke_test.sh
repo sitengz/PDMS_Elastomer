@@ -58,7 +58,7 @@ run_case grafted_comb --strand-topology grafted --backbone-length 64 \
 run_case grafted_bottlebrush --strand-topology grafted --backbone-length 24 \
     --side-chain-length 5 --graft-spacing 0 \
     --graft-functional-fraction 25 --strand-count 2 \
-    --crosslinker-length 8 --density 0.01 \
+    --crosslinker-length 8 --density 0.01 --target-conversion 95 \
     --output data.grafted_bottlebrush
 
 base_dir="$test_root/base/PDMS_elastomer"
@@ -162,19 +162,32 @@ grep -q '^variable        stoichiometric_maximum_bonds equal 12$' \
     "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 11 error continue$' \
     "$controlled_bulk_dir/in.controlled_bulk"
+grep -q 'prob 0.50000000' "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^fix             compress_to_cure all deform 1 x scale 0.584803' \
+    "$controlled_bulk_dir/in.controlled_bulk"
+grep -q '^fix             compress_to_target all deform 1 x scale 0.854987' \
+    "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '^run             5000000$' \
     "$controlled_bulk_dir/in.controlled_bulk"
 grep -q '^variable        target_new_bonds equal 22$' \
     "$controlled_film_dir/in.controlled_film"
 grep -q '^fix             conversion_halt all halt 1 v_created_new_bonds >= 22 error continue$' \
     "$controlled_film_dir/in.controlled_film"
+grep -q '^fix             compress_to_cure all deform 1 x scale 0.447213' \
+    "$controlled_film_dir/in.controlled_film"
+grep -q '^fix             compress_to_target all deform 1 x scale 0.790569' \
+    "$controlled_film_dir/in.controlled_film"
+grep -q '^fix             conversion_halt all halt 1 ' \
+    "$grafted_bottlebrush_dir/in.grafted_bottlebrush"
 awk '
     /fix             xlink/ && !xlink { xlink = NR }
-    /fix             compress/ && !compress { compress = NR }
-    /unfix           compress/ && !unfix_compress { unfix_compress = NR }
+    /fix             compress_to_cure/ { compress_to_cure = NR }
+    /unfix           compress_to_cure/ { unfix_compress_to_cure = NR }
     /fix             conversion_halt/ && !halt { halt = NR }
     /unfix           conversion_halt/ && !unfix_halt { unfix_halt = NR }
     /unfix           xlink/ && !unfix_xlink { unfix_xlink = NR }
+    /fix             compress_to_target/ { compress_to_target = NR }
+    /unfix           compress_to_target/ { unfix_compress_to_target = NR }
     /# Equilibrate the cured network at 800 K/ { post_cure = NR }
     /reset_timestep  0/ && post_cure && NR > post_cure && !post_cure_reset {
         post_cure_reset = NR
@@ -183,10 +196,14 @@ awk '
         unfix_xlink && NR > unfix_xlink && !thermo_reset { thermo_reset = NR }
     /# Cool from 800 K to 300 K/ { cool = NR }
     END {
-        exit !(xlink < compress && compress < unfix_compress &&
-               unfix_compress < halt && halt < unfix_halt &&
+        exit !(compress_to_cure < unfix_compress_to_cure &&
+               unfix_compress_to_cure < xlink && xlink < halt &&
+               halt < unfix_halt &&
                unfix_halt < unfix_xlink && unfix_xlink < thermo_reset &&
-               thermo_reset < post_cure && post_cure < post_cure_reset &&
+               thermo_reset < compress_to_target &&
+               compress_to_target < unfix_compress_to_target &&
+               unfix_compress_to_target < post_cure &&
+               post_cure < post_cure_reset &&
                post_cure_reset < cool)
     }
 ' "$controlled_bulk_dir/in.controlled_bulk"
@@ -207,13 +224,15 @@ grep -q '"stoichiometric_maximum_new_bonds": 12' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"target_new_bonds": 11' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"crosslinking_active_during_compression": true' \
+grep -q '"crosslinking_active_during_compression": false' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"target_density_reached_before_conversion_halt": true' \
+grep -q '"curing_density_g_per_cm3": 0.50000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
-grep -q '"maximum_post_compression_curing_steps": 5000000' \
+grep -q '"maximum_curing_hold_steps": 5000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"post_cure_800K_equilibration_steps": 1000000' \
+    "$controlled_bulk_dir/controlled_bulk.info"
+grep -q '"bond_creation_probability": 0.50000000' \
     "$controlled_bulk_dir/controlled_bulk.info"
 grep -q '"possible_final_step_overshoot": true' \
     "$controlled_bulk_dir/controlled_bulk.info"
