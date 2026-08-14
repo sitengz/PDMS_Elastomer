@@ -7,9 +7,9 @@ define the production cases intended for the paper.
 
 ## Controlled composition
 
-Cases `01`--`05` contain 750 four-functional, 32-bead crosslinkers and
-3,000 functional groups on each stoichiometric side. Case `00` doubles the
-linear-chain population while halving its contour length, giving 1,500
+Cases `01` and `03`--`06` contain 750 four-functional, 32-bead crosslinkers
+and 3,000 functional groups on each stoichiometric side. Case `02` doubles
+the linear-chain population while halving its contour length, giving 1,500
 crosslinkers and 6,000 functional groups on each side. All systems start from
 the common placement density `0.05 g/cm^3`, target `0.8 g/cm^3` and 95%
 conversion, and contain no moderator or filler. The lower placement density is
@@ -18,12 +18,12 @@ overlap; reaching 95% before compression must be confirmed in the bulk pilots.
 
 | Case | Precursor population | Precursor beads | Total beads |
 |:--|:--|--:|--:|
-| `00_linear_40_high_xlink` | 3,000 linear 40-bead chains, functionality 2 | 120,000 | 168,000 |
 | `01_linear_reference` | 1,500 linear chains, functionality 2 | 120,000 | 144,000 |
-| `02_ring_4functional` | 750 rings, functionality 4 | 120,000 | 144,000 |
-| `03_star_4arm` | 750 equal four-arm stars | 120,750 | 144,750 |
-| `04_comb_4sidechain` | 750 four-side-chain combs | 120,000 | 144,000 |
-| `05_bottlebrush_4functional` | 750 four-functional bottlebrushes | 120,000 | 144,000 |
+| `02_linear_40_high_xlink` | 3,000 linear 40-bead chains, functionality 2 | 120,000 | 168,000 |
+| `03_ring_4functional` | 750 rings, functionality 4 | 120,000 | 144,000 |
+| `04_star_4arm` | 750 equal four-arm stars | 120,750 | 144,750 |
+| `05_comb_4sidechain` | 750 four-side-chain combs | 120,000 | 144,000 |
+| `06_bottlebrush_4functional` | 750 four-functional bottlebrushes | 120,000 | 144,000 |
 
 The star intentionally contains 161 beads per precursor so all four arms can
 contain exactly 40 beads. Its 0.52% larger total bead count is recorded rather
