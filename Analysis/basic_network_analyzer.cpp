@@ -143,7 +143,7 @@ ShapeData shape_data(const std::vector<Vec3> &positions) {
     for (int iteration = 0; iteration < 50; ++iteration) {
         int p = 0, q = 1;
         double largest = std::fabs(matrix[0][1]);
-        for (const auto pair : {std::pair<int, int>{0, 2}, {1, 2}}) {
+        for (const auto& pair : {std::pair<int, int>{0, 2}, {1, 2}}) {
             const double value = std::fabs(matrix[pair.first][pair.second]);
             if (value > largest) { largest = value; p = pair.first; q = pair.second; }
         }
