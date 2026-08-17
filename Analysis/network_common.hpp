@@ -173,6 +173,9 @@ struct ModelInfo {
     std::string geometry;
     std::string strand_topology;
     long long format_version = 0;
+    double film_thickness_angstrom =
+        std::numeric_limits<double>::quiet_NaN();
+    double film_wall_cutoff_per_side_angstrom = 0.0;
     std::array<ComponentInfo, kComponentCount> components;
     long long total_beads = 0;
     long long total_molecules = 0;
@@ -215,6 +218,15 @@ inline long long optional_integer(
     catch (const std::runtime_error &) { return fallback; }
 }
 
+inline double optional_number(
+    const std::string &text, const std::string &key,
+    double fallback = std::numeric_limits<double>::quiet_NaN()) {
+    const std::regex null_pattern("\"" + key + "\"\\s*:\\s*null");
+    if (std::regex_search(text, null_pattern)) return fallback;
+    try { return json_number(text, key); }
+    catch (const std::runtime_error &) { return fallback; }
+}
+
 inline ModelInfo parse_model_info(const std::string &path) {
     const std::string text = read_text_file(path);
     const std::string format = json_string(text, "format");
@@ -227,6 +239,24 @@ inline ModelInfo parse_model_info(const std::string &path) {
     info.geometry = json_string(text, "geometry");
     if (info.geometry != "bulk" && info.geometry != "film")
         throw std::runtime_error("geometry must be bulk or film");
+    if (info.geometry == "film") {
+        info.film_thickness_angstrom = optional_number(
+            text, "film_thickness_angstrom");
+        info.film_wall_cutoff_per_side_angstrom = optional_number(
+            text, "film_wall_cutoff_per_side_angstrom", 0.0);
+        if (!(info.film_wall_cutoff_per_side_angstrom > 0.0)) {
+            try {
+                const std::string simulation =
+                    json_object_for_key(text, "simulation_template");
+                const std::string cold_lj =
+                    json_object_for_key(simulation, "cold_lj");
+                info.film_wall_cutoff_per_side_angstrom =
+                    json_number(cold_lj, "cutoff");
+            } catch (const std::runtime_error &) {
+                info.film_wall_cutoff_per_side_angstrom = 0.0;
+            }
+        }
+    }
 
     const std::string components = json_object_for_key(text, "components");
     info.components[kStrand] = parse_component(components, "strands");

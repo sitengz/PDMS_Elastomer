@@ -317,7 +317,10 @@ The second-stage basic network analyzer reports per-strand `Ree`, `Rg`,
 contour and shape metrics, grouped distributions, density, conversion,
 connectivity, and structural elasticity estimates. `Lpp` remains explicitly
 unavailable until a validated primitive-path result is supplied. The third
-analyzer reports reaction and defect profiles along z and can use
+analyzer reports component density, local conversion, reaction, defect,
+contour, conformation, and orientation profiles along z. It also writes
+folded wall-distance and wall/core summary tables, optionally reads
+`Z1+SP.dat` for kink and primitive-path profiles, and can use
 `dump.msd.lammpstrj` for origin-layer-resolved dynamics. See
 [`Analysis/README.md`](Analysis/README.md) for commands, definitions, output
 columns, and the film/Z1+ boundary caveat.

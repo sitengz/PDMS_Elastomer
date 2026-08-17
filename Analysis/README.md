@@ -134,7 +134,7 @@ snapshot contains no primitive-path contour, and neither `Lc`, `Ree`, nor a
 graph shortest path is a valid substitute. A future validated primitive-path
 reader can populate this field without changing the table schema.
 
-## 3. Distribution and layer dynamics
+## 3. Distribution, primitive-path, and layer-dynamics profiles
 
 Static z profiles need only the final snapshot:
 
@@ -143,10 +143,77 @@ Static z profiles need only the final snapshot:
     --bin-width 5
 ```
 
-`network_z_profile.<case>.tsv` reports reaction-bond, junction,
-active-strand, dangling-end, dangling-loop, self-loop, and isolated-parent
-distributions. Markers are bond or contour midpoints except dangling ends and
-isolated parent centers.
+The original reaction-bond, junction, active-strand, dangling-end,
+dangling-loop, self-loop, isolated-parent, crosslink-density, and
+defect-density columns remain at the beginning of
+`network_z_profile.<case>.tsv`. The extended columns add:
+
+- total and component-resolved bead counts and mass densities;
+- final-position strand, crosslinker, moderator, and combined local
+  functional-site conversion;
+- status-resolved object and contour-length densities;
+- local reduced-contour bond orientation (`P2_x`, `P2_y`, and `P2_z`);
+- all-strand and active-strand `Ree` components, `Ree/Lc`, and orientation,
+  assigned by contour midpoint;
+- film material coordinate and distances from the box wall and effective
+  wall boundary.
+
+Reaction bonds use periodicity-corrected midpoints. Reduced-contour length
+and local orientation use segment midpoints. Defects are still retained;
+`defect_contour_length` includes every reduced strand not classified as
+active. Local conversion is a final-state spatial observable, not the
+location or time at which a reaction occurred.
+
+For films, the material coordinate uses the nominal wall-free thickness and
+cold-wall cutoff stored in `.info`:
+
+```text
+s = (z - zlo - wall_cutoff) / film_thickness
+```
+
+Consequently, `s < 0` or `s > 1` explicitly shows any beads inside the soft
+wall-force region. Full-box bins are retained for compatibility and to avoid
+silently discarding those beads.
+
+Two additional static outputs are written:
+
+- `network_z_profile_folded.<case>.tsv` combines equal-distance layers at the
+  two walls while preserving the correct paired-bin volume;
+- `network_z_profile_summary.<case>.tsv` compares the two wall regions with
+  the core and reports wall/core ratios and top/bottom asymmetry. The default
+  wall and centered-core fractions are both `0.20`; change them with
+  `--wall-fraction` and `--core-fraction`.
+
+For bulk references, z is periodic and the origin is arbitrary. Their folded
+and boundary/core tables are therefore uniformity controls, not physical
+surface measurements.
+
+### Default Z1+ spatial profile
+
+After Z1+ has processed the unscaled physical-coordinate export, place
+`Z1+SP.dat` in the selected analysis directory. The analyzer uses it by
+default with no additional option:
+
+```bash
+./bin/network_profile_analyzer data.CASE.npt_eq CASE.info --bin-width 5
+```
+
+Use an explicit path only when the result is stored elsewhere:
+
+```bash
+./bin/network_profile_analyzer data.CASE.npt_eq CASE.info \
+    --z1-sp analysis_CASE/Z1+SP.dat --bin-width 5
+```
+
+Primitive-path points with a nonzero flag are counted as
+kinks. The analyzer also reports primitive-path contour-length density and
+primitive-segment `P2_z`. Z1+ box lengths must match the LAMMPS snapshot;
+the analyzer never applies an implicit coordinate scale. Without Z1+ input,
+the stable output schema is retained with `z1_data_available=0` and derived
+Z1+ values set to `NaN`. Use `--no-z1` to deliberately ignore an existing
+`Z1+SP.dat` file.
+
+### Optional layer dynamics
 
 Add the production trajectory for layer-resolved dynamics:
 

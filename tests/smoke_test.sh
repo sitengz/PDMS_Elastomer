@@ -928,14 +928,63 @@ awk '
     }
 ' "$ring_final" > "$trajectory"
 
+z1_sp="$test_root/Z1+SP.dat"
+awk '
+    /xlo xhi$/ { lx = $2 - $1 }
+    /ylo yhi$/ { ly = $2 - $1 }
+    /zlo zhi$/ { lz = $2 - $1 }
+    /^Atoms # full$/ { in_atoms = 1; next }
+    in_atoms && NF >= 7 && !found {
+        x = $5; y = $6; z = $7; found = 1
+    }
+    END {
+        print 1
+        print lx, ly, lz
+        print 3
+        print x, y, z, 1.0, 0
+        print x + 1.0, y, z + 1.0, 4.0, 1
+        print x + 2.0, y, z + 2.0, 7.0, 0
+    }
+' "$ring_final" > "$z1_sp"
+
 profile_analysis="$test_root/profile_analysis"
 "$profile_analyzer" "$ring_final" \
     "$ring_bifunctional_dir/ring_bifunctional.info" \
-    --trajectory "$trajectory" --bin-width 20 \
+    --trajectory "$trajectory" --z1-sp "$z1_sp" --bin-width 20 \
     --output-dir "$profile_analysis" >/dev/null
 test -s "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
+test -s "$profile_analysis/network_z_profile_folded.ring_bifunctional.tsv"
+test -s "$profile_analysis/network_z_profile_summary.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
 awk 'NR > 1 && $1 == 1 && $11 > 0 { found = 1 } END { exit !found }' \
     "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    {
+        mass += $header["mass_density_total_g_cm-3"]
+        kinks += $header["z1_kinks"]
+        available += $header["z1_data_available"]
+    }
+    END { exit !(mass > 0 && kinks == 1 && available > 0) }
+' "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
+grep -q '^z1_kink_density' \
+    "$profile_analysis/network_z_profile_summary.ring_bifunctional.tsv"
+
+profile_auto_analysis="$test_root/profile_auto_analysis"
+mkdir -p "$profile_auto_analysis"
+cp "$z1_sp" "$profile_auto_analysis/Z1+SP.dat"
+"$profile_analyzer" "$ring_final" \
+    "$ring_bifunctional_dir/ring_bifunctional.info" \
+    --bin-width 20 --output-dir "$profile_auto_analysis" >/dev/null
+grep -q $'Z1+ primitive-path result:.*Z1+SP.dat' \
+    "$profile_auto_analysis/profile_report.ring_bifunctional.txt"
+"$profile_analyzer" "$ring_final" \
+    "$ring_bifunctional_dir/ring_bifunctional.info" \
+    --no-z1 --bin-width 20 --output-dir "$profile_auto_analysis" >/dev/null
+grep -q '^Z1+ profile: unavailable' \
+    "$profile_auto_analysis/profile_report.ring_bifunctional.txt"
 
 echo "PDMS elastomer smoke tests passed"
