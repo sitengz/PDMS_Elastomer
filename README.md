@@ -19,6 +19,12 @@ Executables are written to `bin/`. To build only the generator:
 make bin/pdms_elastomer_generator
 ```
 
+The independent mechanical-test generator can be built with:
+
+```bash
+make bin/tensile_test_generator
+```
+
 ## Components and molecule IDs
 
 Molecule IDs are consecutive and grouped in this order:
@@ -299,6 +305,43 @@ The generated Slurm file is a template for the Iowa State Nova environment.
 Review its modules, partition, memory, wall time, and email before use on a
 different cluster.
 
+## Tensile tests
+
+The tensile-test generator starts from the frozen network in
+`data.<case>.npt_eq` and the matching version-3 `<case>.info`. It does not
+minimize, create bonds, or change network connectivity. Direct use is:
+
+```bash
+./bin/tensile_test_generator data.CASE.npt_eq CASE.info
+```
+
+The default `auto` mode creates independent `x`, `y`, and `z` tests for a
+bulk system and the two in-plane `x` and `y` tests for a film. Each production
+geometry also has `run_tensile.sh` beside its original `run.sh`. Once the
+original simulation has completed, the usual command has no arguments:
+
+```bash
+bash simulations/02_linear_40_high_xlink/film_4Ree/run_tensile.sh
+```
+
+The runner derives the case name from `model.conf`, locates the normal
+`<case>/data.<case>.npt_eq` and `<case>/<case>.info` outputs, and creates
+`<case>/tensile/<direction>/`. Each direction contains a LAMMPS input,
+versioned tensile `.info`, and Nova submission script. The run performs 5M
+steps of 300 K equilibration followed by engineering-rate deformation at
+`2e-9 fs^-1` to 20% strain. It writes block-averaged stress, stretch, box,
+and volume data without a trajectory dump. Film stresses are normalized by
+the nominal material volume `Lx*Ly*H`, not the full wall-containing box.
+
+Nonstandard source locations can be supplied without editing the runner:
+
+```bash
+NPT_EQ_FILE=/path/data.CASE.npt_eq \
+INFO_FILE=/path/CASE.info \
+TENSILE_OUTPUT_DIR=/path/tensile \
+  bash simulations/ARCHITECTURE/GEOMETRY/run_tensile.sh
+```
+
 ## Analysis
 
 The topology-first analyzers read `data.<case>.npt_eq` and the matching
@@ -328,6 +371,8 @@ columns, and the film/Z1+ boundary caveat.
 ## Repository layout
 
 - `Generator/pdms_elastomer_generator.cpp`: generic model generator;
+- `Generator/tensile_test_generator.cpp`: post-equilibration tensile-test
+  generator for bulk and in-plane film loading;
 - `examples/01_default/`: reproducible current-default sample;
 - `examples/02_ring_bifunctional/`: ring strands with two regular reactive sites;
 - `examples/03_ring_tetrafunctional/`: ring strands with four random reactive sites;
@@ -343,7 +388,9 @@ columns, and the film/Z1+ boundary caveat.
 - `Generator/pdms_filler_component.hpp`: neutral PDMS filler builder;
 - `Analysis/`: topology reduction, static network properties, Z1+ export,
   z profiles, and layer dynamics;
-- `tests/smoke_test.sh`: generator and analyzer regression checks.
+- `tests/smoke_test.sh`: model-generator and analyzer regression checks;
+- `tests/tensile_generator_test.sh`: bulk, film, and auto-detection tensile
+  generator checks.
 
 ## References
 

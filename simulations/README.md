@@ -80,3 +80,23 @@ thickness; the complete box length includes both wall cutoff layers.
 5. Generate and run that architecture's `2Ree`, `4Ree`, and `8Ree` films.
 6. Apply the same topology, profile, Z1+, and mechanical-analysis definitions
    to every system.
+
+## Tensile-test generation
+
+Every geometry folder contains `run_tensile.sh` beside `run.sh`. After the
+original Slurm job has produced `data.<case>.npt_eq`, generate the mechanical
+test without supplying paths:
+
+```bash
+bash simulations/02_linear_40_high_xlink/film_4Ree/run_tensile.sh
+```
+
+The shared runner reads the case name from that folder's `model.conf` and
+checks the expected `.npt_eq` and `.info` pair. Its default `auto` mode creates
+three loading directions for bulk systems and the two directions parallel to
+the film for film systems. These are independent jobs under
+`<case>/tensile/x`, `y`, and, for bulk only, `z`.
+
+Environment overrides are available for copied or reorganized results:
+`NPT_EQ_FILE`, `INFO_FILE`, `TENSILE_OUTPUT_DIR`, and `TENSILE_MODE`. Additional
+tensile-generator command-line options can be appended to `run_tensile.sh`.
