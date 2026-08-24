@@ -15,6 +15,7 @@ struct Options {
     double bin_width = 5.0;
     double wall_fraction = 0.20;
     double core_fraction = 0.20;
+    double diffusion_fit_start_fraction = 0.50;
     long long frame_stride = 1;
 };
 
@@ -88,6 +89,50 @@ struct DumpFrame {
     Box box;
     std::vector<Vec3> unwrapped;
 };
+
+struct LinearFit {
+    long long points = 0;
+    double slope = std::numeric_limits<double>::quiet_NaN();
+    double intercept = std::numeric_limits<double>::quiet_NaN();
+    double r_squared = std::numeric_limits<double>::quiet_NaN();
+};
+
+LinearFit linear_fit(const std::vector<double> &time,
+                     const std::vector<double> &value,
+                     double start_time) {
+    LinearFit result;
+    double sum_x = 0.0, sum_y = 0.0;
+    for (std::size_t index = 0; index < time.size(); ++index) {
+        if (time[index] < start_time || !std::isfinite(value[index])) continue;
+        ++result.points;
+        sum_x += time[index];
+        sum_y += value[index];
+    }
+    if (result.points < 2) return result;
+    const double mean_x = sum_x / result.points;
+    const double mean_y = sum_y / result.points;
+    double sxx = 0.0, sxy = 0.0, syy = 0.0;
+    for (std::size_t index = 0; index < time.size(); ++index) {
+        if (time[index] < start_time || !std::isfinite(value[index])) continue;
+        const double dx = time[index] - mean_x;
+        const double dy = value[index] - mean_y;
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+    }
+    if (!(sxx > 0.0)) return result;
+    result.slope = sxy / sxx;
+    result.intercept = mean_y - result.slope * mean_x;
+    double residual = 0.0;
+    for (std::size_t index = 0; index < time.size(); ++index) {
+        if (time[index] < start_time || !std::isfinite(value[index])) continue;
+        const double difference = value[index] -
+            (result.intercept + result.slope * time[index]);
+        residual += difference * difference;
+    }
+    if (syy > 0.0) result.r_squared = 1.0 - residual / syy;
+    return result;
+}
 
 std::vector<std::string> words(const std::string &line) {
     std::vector<std::string> result;
@@ -901,12 +946,15 @@ void write_profile_summary(
 }
 
 void write_layer_dynamics(
-    const std::filesystem::path &path, const Options &options,
-    const ModelInfo &info, const DataFile &data, int bins) {
+    const std::filesystem::path &msd_path,
+    const std::filesystem::path &diffusion_path,
+    const Options &options, const ModelInfo &info, const DataFile &data) {
     DumpReader reader(options.trajectory_file);
     DumpFrame origin;
     if (!reader.next(origin, data.declared_atoms))
         throw std::runtime_error("trajectory contains no frames");
+    const int bins = std::max(1, static_cast<int>(
+        std::ceil(origin.box.lz() / options.bin_width)));
     std::vector<int> origin_bin(origin.unwrapped.size(), -1);
     std::vector<long long> bin_counts(static_cast<std::size_t>(bins), 0);
     for (long long id = 1; id <= data.declared_atoms; ++id) {
@@ -917,12 +965,15 @@ void write_layer_dynamics(
         origin_bin[static_cast<std::size_t>(id)] = bin;
         ++bin_counts[static_cast<std::size_t>(bin)];
     }
-    std::ofstream out(path);
-    if (!out) throw std::runtime_error("cannot write " + path.string());
+    std::ofstream out(msd_path);
+    if (!out) throw std::runtime_error("cannot write " + msd_path.string());
     out << "frame\ttimestep\ttime_ns\tbin\tzlo_origin_A\tzhi_origin_A"
         << "\tstrand_beads\tmsd_x_A2\tmsd_y_A2\tmsd_z_A2"
         << "\tmsd_parallel_A2\tmsd_total_A2\tdrift_x_A\tdrift_y_A\tdrift_z_A\n";
     const double width = origin.box.lz() / bins;
+    std::vector<double> sampled_times;
+    std::vector<std::vector<double>> parallel_msd(static_cast<std::size_t>(bins));
+    std::vector<std::vector<double>> total_msd(static_cast<std::size_t>(bins));
     long long frame_index = 0;
     DumpFrame current = origin;
     while (true) {
@@ -945,6 +996,7 @@ void write_layer_dynamics(
             }
             const double time_ns =
                 (current.timestep - origin.timestep) * info.timestep_fs * 1.0e-6;
+            sampled_times.push_back(time_ns);
             for (int bin = 0; bin < bins; ++bin) {
                 const long long count = bin_counts[static_cast<std::size_t>(bin)];
                 const Vec3 msd = count > 0
@@ -953,16 +1005,62 @@ void write_layer_dynamics(
                            std::numeric_limits<double>::quiet_NaN(),
                            std::numeric_limits<double>::quiet_NaN()};
                 const double zlo = origin.box.zlo + bin * width;
+                const double parallel = msd.x + msd.y;
+                const double total = parallel + msd.z;
+                parallel_msd[static_cast<std::size_t>(bin)].push_back(parallel);
+                total_msd[static_cast<std::size_t>(bin)].push_back(total);
                 out << frame_index << '\t' << current.timestep << '\t'
                     << std::setprecision(12) << time_ns << '\t' << bin + 1 << '\t'
                     << zlo << '\t' << zlo + width << '\t' << count << '\t'
                     << msd.x << '\t' << msd.y << '\t' << msd.z << '\t'
-                    << msd.x + msd.y << '\t' << msd.x + msd.y + msd.z << '\t'
+                    << parallel << '\t' << total << '\t'
                     << drift.x << '\t' << drift.y << '\t' << drift.z << '\n';
             }
         }
         ++frame_index;
         if (!reader.next(current, data.declared_atoms)) break;
+    }
+
+    std::ofstream diffusion(diffusion_path);
+    if (!diffusion)
+        throw std::runtime_error("cannot write " + diffusion_path.string());
+    diffusion
+        << "bin\tzlo_origin_A\tzhi_origin_A\tstrand_beads"
+        << "\tfit_start_ns\tfit_end_ns"
+        << "\tfit_points_xy\tslope_xy_A2_per_ns\tintercept_xy_A2\tR2_xy"
+        << "\tD_xy_A2_per_ns\tD_xy_cm2_per_s"
+        << "\tfit_points_3D\tslope_3D_A2_per_ns\tintercept_3D_A2\tR2_3D"
+        << "\tD_3D_A2_per_ns\tD_3D_cm2_per_s"
+        << "\trecommended_dimension\trecommended_D_A2_per_ns"
+        << "\trecommended_D_cm2_per_s\trecommended_R2\n";
+    const double end_time = sampled_times.empty() ? 0.0 : sampled_times.back();
+    const double start_time = options.diffusion_fit_start_fraction * end_time;
+    constexpr double kAngstrom2PerNsToCm2PerS = 1.0e-7;
+    for (int bin = 0; bin < bins; ++bin) {
+        const LinearFit xy = linear_fit(
+            sampled_times, parallel_msd[static_cast<std::size_t>(bin)], start_time);
+        const LinearFit three_d = linear_fit(
+            sampled_times, total_msd[static_cast<std::size_t>(bin)], start_time);
+        const double d_xy = xy.slope / 4.0;
+        const double d_3d = three_d.slope / 6.0;
+        const bool recommend_xy = info.geometry == "film";
+        const double recommended_d = recommend_xy ? d_xy : d_3d;
+        const double recommended_r2 = recommend_xy ? xy.r_squared : three_d.r_squared;
+        const double zlo = origin.box.zlo + bin * width;
+        diffusion << bin + 1 << '\t' << std::setprecision(12)
+            << zlo << '\t' << zlo + width << '\t'
+            << bin_counts[static_cast<std::size_t>(bin)] << '\t'
+            << start_time << '\t' << end_time << '\t'
+            << xy.points << '\t' << xy.slope << '\t' << xy.intercept << '\t'
+            << xy.r_squared << '\t' << d_xy << '\t'
+            << d_xy * kAngstrom2PerNsToCm2PerS << '\t'
+            << three_d.points << '\t' << three_d.slope << '\t'
+            << three_d.intercept << '\t' << three_d.r_squared << '\t'
+            << d_3d << '\t' << d_3d * kAngstrom2PerNsToCm2PerS << '\t'
+            << (recommend_xy ? "2D_xy" : "3D") << '\t'
+            << recommended_d << '\t'
+            << recommended_d * kAngstrom2PerNsToCm2PerS << '\t'
+            << recommended_r2 << '\n';
     }
 }
 
@@ -1016,10 +1114,17 @@ void write_report(
         out << "trajectory: " << options.trajectory_file << "\n"
             << "layer dynamics selection: all component-1 beads, grouped by first-frame z\n"
             << "MSD convention: displacement from first frame with whole-system COM drift removed\n"
-            << "frame stride: " << options.frame_stride << "\n";
+            << "trajectory-layer bins: derived from first-frame box and requested bin width\n"
+            << "frame stride: " << options.frame_stride << "\n"
+            << "diffusion fit start fraction: "
+            << options.diffusion_fit_start_fraction << " of recorded duration\n"
+            << "D_xy definition: slope(MSD_x+MSD_y)/4\n"
+            << "D_3D definition: slope(MSD_total)/6\n"
+            << "diffusion slopes remain signed; negative values flag unresolved diffusion or noise\n";
     }
     if (info.geometry == "film")
-        out << "film guidance: compare x/y or parallel MSD; z is confined\n";
+        out << "film guidance: compare x/y or parallel MSD; interpret z using the"
+            << " trajectory boundary condition (wall-confined or free-surface)\n";
 }
 
 void print_help(const char *program) {
@@ -1033,6 +1138,8 @@ void print_help(const char *program) {
         << "  --wall-fraction X    material fraction at each wall for summary (default 0.20)\n"
         << "  --core-fraction X    centered material fraction for summary (default 0.20)\n"
         << "  --frame-stride N     analyze every Nth trajectory frame (default 1)\n"
+        << "  --diffusion-fit-start-fraction X\n"
+        << "                      fit D over final 1-X fraction (default 0.50)\n"
         << "  --output-dir PATH    output directory (default analysis_<case>)\n"
         << "  --help               show this help\n";
 }
@@ -1061,6 +1168,8 @@ Options parse_options(int argc, char **argv) {
         else if (option == "--core-fraction")
             options.core_fraction = std::stod(value());
         else if (option == "--frame-stride") options.frame_stride = std::stoll(value());
+        else if (option == "--diffusion-fit-start-fraction")
+            options.diffusion_fit_start_fraction = std::stod(value());
         else if (option == "--output-dir") options.output_directory = value();
         else if (option == "--help") { print_help(argv[0]); std::exit(0); }
         else throw std::runtime_error("unknown option: " + option);
@@ -1073,6 +1182,10 @@ Options parse_options(int argc, char **argv) {
     if (options.disable_z1 && !options.z1_sp_file.empty())
         throw std::runtime_error("--no-z1 cannot be combined with --z1-sp");
     if (options.frame_stride < 1) throw std::runtime_error("frame stride must be positive");
+    if (!(options.diffusion_fit_start_fraction >= 0.0 &&
+          options.diffusion_fit_start_fraction < 1.0))
+        throw std::runtime_error(
+            "diffusion fit start fraction must be at least 0 and less than 1");
     return options;
 }
 
@@ -1114,7 +1227,8 @@ int main(int argc, char **argv) {
         if (!options.trajectory_file.empty())
             write_layer_dynamics(
                 directory / ("layer_dynamics." + name + ".tsv"),
-                options, info, data, bins);
+                directory / ("layer_diffusion." + name + ".tsv"),
+                options, info, data);
         write_report(directory / ("profile_report." + name + ".txt"),
                      options, info, data, bins, z1_sp_file);
         std::cout << "Network profiles written to " << directory.string() << '\n';

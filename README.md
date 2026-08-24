@@ -359,16 +359,21 @@ bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
 ```
 
 The runner automatically reads the same final `.npt_eq` and version-3
-`.info` pair. It creates `<case>/layer_dynamics/` containing a fixed-box,
-300 K NVT input, a versioned layer-dynamics `.info`, and a Nova submission
-script. The source `.npt_eq` velocities are retained, network connectivity is
-unchanged, and no additional minimization or box equilibration is performed.
+`.info` pair. It creates `<case>/layer_dynamics/` containing a 300 K NVT
+input, a versioned layer-dynamics `.info`, and a Nova submission script. For
+a film, the source wall fixes are not recreated and the nonperiodic z box is
+expanded by 20 A at each boundary without remapping atoms. This produces two
+free surfaces with vacuum buffers for unreacted chains. Bulk boxes remain
+unchanged and periodic.
 
-The default production is 10M steps (50 ns). To preserve early-time
-resolution without making the trajectory ten times larger, frames are written
-every 1,000 steps (5 ps) through the first 1M steps and every 10,000 steps
-(50 ps) through the remaining 9M steps. The expected trajectory contains
-1,901 frames with `x y z ix iy iz`, beginning at timestep zero. For example,
+The source `.npt_eq` velocities are retained and network connectivity is
+unchanged. After wall removal and expansion, the system equilibrates for 1M
+steps (5 ns) and writes `data.<case>.free_surface_eq`. The dynamics clock and
+MSD origin are then reset for a separate 5M-step (25 ns) production. Frames
+are written every 1,000 steps (5 ps) through the first production 1M steps and
+every 5,000 steps (25 ps) through the remaining 4M steps. The expected
+trajectory contains 1,801 frames with `x y z ix iy iz`, beginning at
+production timestep zero. For example,
 to request 20M total steps while retaining the same sampling schedule:
 
 ```bash
@@ -410,7 +415,7 @@ columns, and the film/Z1+ boundary caveat.
 - `Generator/pdms_elastomer_generator.cpp`: generic model generator;
 - `Generator/tensile_test_generator.cpp`: post-equilibration tensile-test
   generator for bulk and in-plane film loading;
-- `Generator/layer_dynamics_generator.cpp`: extended fixed-box trajectory
+- `Generator/layer_dynamics_generator.cpp`: extended free-surface trajectory
   generator for origin-layer-resolved dynamics;
 - `examples/01_default/`: reproducible current-default sample;
 - `examples/02_ring_bifunctional/`: ring strands with two regular reactive sites;

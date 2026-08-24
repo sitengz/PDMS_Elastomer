@@ -104,16 +104,17 @@ tensile-generator command-line options can be appended to `run_tensile.sh`.
 ## Extended layer-dynamics generation
 
 Every geometry folder also contains `run_layer_dynamics.sh`. It uses the same
-automatic `.npt_eq` and `.info` lookup but creates one fixed-box, 300 K NVT
-job per system rather than separate loading directions:
+automatic `.npt_eq` and `.info` lookup but creates one 300 K NVT job per
+system rather than separate loading directions:
 
 ```bash
 bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
 ```
 
-The default 10M-step (50 ns) trajectory samples every 1,000 steps through the
-first 1M steps and every 10,000 steps thereafter. This gives 1,901 frames and
-retains the short-time resolution of the original trajectory while extending
-the observation time tenfold. Outputs are stored under
+For films, no wall fixes are restored and the z box is expanded by 20 A at
+each side. The resulting free-surface state equilibrates for 1M steps and is
+written to `data.<case>.free_surface_eq`. A separate 5M-step (25 ns)
+production samples every 1,000 steps through its first 1M steps and every
+5,000 steps thereafter, giving 1,801 frames. Outputs are stored under
 `<case>/layer_dynamics/`. Use `LAYER_DYNAMICS_OUTPUT_DIR` for a nonstandard
 destination, or append generator options such as `--production-steps`.

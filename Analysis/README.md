@@ -243,3 +243,19 @@ Whole-system center-of-mass drift is removed. The generated trajectory's
 The layer MSD is an origin-layer observable, not a time-origin-averaged MSD.
 For films, x/y or the in-plane sum is normally the relevant mobility measure,
 while z reflects confinement.
+
+The same run writes `layer_diffusion.<case>.tsv`. For every origin layer it
+fits the final half of the recorded trajectory by default and reports
+
+```text
+D_xy = slope(MSD_x + MSD_y) / 4
+D_3D = slope(MSD_total) / 6
+```
+
+Both `A^2/ns` and `cm^2/s` are provided with the fit intercept, point count,
+and R-squared value. Films recommend `D_xy`; bulk systems recommend `D_3D`.
+The slopes remain signed: a negative value is retained as evidence that a
+diffusive regime was not resolved rather than being silently replaced by
+zero. Change the fit window with
+`--diffusion-fit-start-fraction X`, where the default `0.50` uses the final
+half of the production duration.

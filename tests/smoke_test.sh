@@ -911,7 +911,7 @@ awk '
         x[count] = $5; y[count] = $6; z[count] = $7
     }
     END {
-        for (frame = 0; frame < 2; ++frame) {
+        for (frame = 0; frame < 6; ++frame) {
             print "ITEM: TIMESTEP"
             print frame * 1000
             print "ITEM: NUMBER OF ATOMS"
@@ -920,7 +920,7 @@ awk '
             print xlo, xhi; print ylo, yhi; print zlo, zhi
             print "ITEM: ATOMS id mol type x y z ix iy iz"
             for (i = 1; i <= count; ++i) {
-                displacement = frame && molecule[i] <= 12 ? 1.0 : 0.0
+                displacement = frame && molecule[i] <= 12 ? sqrt(frame) : 0.0
                 print id[i], molecule[i], type[i], x[i] + displacement,
                       y[i], z[i], 0, 0, 0
             }
@@ -956,8 +956,21 @@ test -s "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
 test -s "$profile_analysis/network_z_profile_folded.ring_bifunctional.tsv"
 test -s "$profile_analysis/network_z_profile_summary.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
+test -s "$profile_analysis/layer_diffusion.ring_bifunctional.tsv"
 awk 'NR > 1 && $1 == 1 && $11 > 0 { found = 1 } END { exit !found }' \
     "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
+grep -q $'^bin\tzlo_origin_A\tzhi_origin_A\tstrand_beads\tfit_start_ns' \
+    "$profile_analysis/layer_diffusion.ring_bifunctional.tsv"
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    $header["strand_beads"] > 0 &&
+    $header["recommended_D_A2_per_ns"] > 0 &&
+    $header["recommended_R2"] > 0.99 { found = 1 }
+    END { exit !found }
+' "$profile_analysis/layer_diffusion.ring_bifunctional.tsv"
 awk -F '\t' '
     NR == 1 {
         for (column = 1; column <= NF; ++column) header[$column] = column

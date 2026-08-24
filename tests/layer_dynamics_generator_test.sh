@@ -54,9 +54,9 @@ for input in "$bulk_input" "$film_input"; do
     grep -q '^compute         global_msd all msd com yes$' "$input"
     grep -q '^dump            layer all custom 1000 dump.layer_dynamics.' "$input"
     grep -q '^dump_modify     layer first yes sort id$' "$input"
-    grep -q '^dump_modify     layer every 10000 first no$' "$input"
-    grep -q '^run             1000000$' "$input"
-    grep -q '^run             9000000$' "$input"
+    grep -q '^dump_modify     layer every 5000 first no$' "$input"
+    test "$(grep -c '^run             1000000$' "$input")" -eq 2
+    grep -q '^run             4000000$' "$input"
     grep -q '^fix             integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
     if grep -Eq '^(velocity|minimize|fix +xlink|fix +deform_box)' "$input"; then
         echo "Layer-dynamics input unexpectedly changes the source state or topology" >&2
@@ -67,14 +67,21 @@ done
 grep -q '^boundary        p p p$' "$bulk_input"
 test "$(grep -c 'wall/lj126' "$bulk_input")" -eq 0
 grep -q '^boundary        p p f$' "$film_input"
-test "$(grep -c 'wall/lj126' "$film_input")" -eq 2
+test "$(grep -c 'wall/lj126' "$film_input")" -eq 0
+grep -q '^change_box      all z delta -20.000000000 20.000000000 units box$' \
+    "$film_input"
+grep -q '^write_data      data.dynamics_film.free_surface_eq nocoeff$' "$film_input"
 
 film_info="$test_root/dynamics_film/layer_dynamics/layer_dynamics.dynamics_film.info"
-grep -q '"production_steps": 10000000' "$film_info"
-grep -q '"production_duration_ns": 50.0000000000' "$film_info"
-grep -q '"expected_trajectory_frames": 1901' "$film_info"
+grep -q '"surface_equilibration_steps": 1000000' "$film_info"
+grep -q '"production_steps": 5000000' "$film_info"
+grep -q '"production_duration_ns": 25.0000000000' "$film_info"
+grep -q '"expected_trajectory_frames": 1801' "$film_info"
 grep -q '"source_velocities_retained": true' "$film_info"
 grep -q '"trajectory_first_frame_is_origin": true' "$film_info"
+grep -q '"source_walls_recreated": false' "$film_info"
+grep -q '"free_surfaces": true' "$film_info"
+grep -q '"vacuum_padding_per_side_angstrom": 20.0000000000' "$film_info"
 
 test -x "$test_root/dynamics_film/layer_dynamics/submit.layer_dynamics.dynamics_film.sh"
 
