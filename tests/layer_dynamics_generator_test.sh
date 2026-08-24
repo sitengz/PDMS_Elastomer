@@ -73,9 +73,13 @@ done
 grep -q '^boundary        p p p$' "$bulk_input"
 test "$(grep -c 'wall/lj126' "$bulk_input")" -eq 0
 grep -q '^boundary        p p f$' "$film_input"
-test "$(grep -c 'wall/lj126' "$film_input")" -eq 0
+test "$(grep -c 'wall/lj126' "$film_input")" -eq 2
 grep -q '^change_box      all z delta -50.000000000 50.000000000 units box$' \
     "$film_input"
+grep -q '^fix             zlo_guard all wall/lj126 zlo EDGE ' "$film_input"
+grep -q '^fix             zhi_guard all wall/lj126 zhi EDGE ' "$film_input"
+grep -q '^fix_modify      zlo_guard energy yes$' "$film_input"
+grep -q '^fix_modify      zhi_guard energy yes$' "$film_input"
 grep -q '^write_data      data.dynamics_film.free_surface_eq nocoeff$' "$film_input"
 
 film_info="$test_root/dynamics_film/layer_dynamics/layer_dynamics.dynamics_film.info"
@@ -90,6 +94,9 @@ grep -q '"expected_msd_trajectory_frames": 1801' "$film_info"
 grep -q '"source_velocities_retained": true' "$film_info"
 grep -q '"each_trajectory_first_frame_is_origin": true' "$film_info"
 grep -q '"source_walls_recreated": false' "$film_info"
+grep -q '"remote_guard_walls": true' "$film_info"
+grep -q '"guard_walls_at_expanded_box_edges": true' "$film_info"
+grep -q '"guard_wall_style": "wall/lj126"' "$film_info"
 grep -q '"free_surfaces": true' "$film_info"
 grep -q '"vacuum_padding_per_side_angstrom": 50.0000000000' "$film_info"
 

@@ -111,9 +111,12 @@ system rather than separate loading directions:
 bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
 ```
 
-For films, no wall fixes are restored and the z box is expanded by 50 A at
-each side. The resulting free-surface state equilibrates for 1M steps and is
-written to `data.<case>.free_surface_eq`. The job next writes an independent
+For films, the material-adjacent walls are not restored and the z box is
+expanded by 50 A at each side. Remote 300 K repulsive guard walls are placed
+at the expanded box edges to prevent detached chains from leaving the box;
+the intervening vacuum preserves the physical free surfaces. The resulting
+state equilibrates for 1M steps and is written to
+`data.<case>.free_surface_eq`. The job next writes an independent
 100 ps Debye-Waller dump every 0.1 ps (1,001 frames), resets the dynamics
 origin, and runs a 5M-step (25 ns) MSD production. The MSD dump samples every
 1,000 steps through its first 1M steps and every 5,000 steps thereafter,

@@ -361,10 +361,12 @@ bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
 The runner automatically reads the same final `.npt_eq` and version-3
 `.info` pair. It creates `<case>/layer_dynamics/` containing a 300 K NVT
 input, a versioned layer-dynamics `.info`, and a Nova submission script. For
-a film, the source wall fixes are not recreated and the nonperiodic z box is
-expanded by 50 A at each boundary without remapping atoms. This produces two
-free surfaces with vacuum buffers for unreacted chains. Bulk boxes remain
-unchanged and periodic.
+a film, the material-adjacent source walls are not recreated and the
+nonperiodic z box is expanded by 50 A at each boundary without remapping
+atoms. Matching 300 K repulsive guard walls are placed only at the expanded
+box edges. The film therefore retains two free material surfaces and wide
+vacuum buffers, while the remote walls prevent detached chains from leaving
+the box. Bulk boxes remain unchanged and periodic.
 
 The source `.npt_eq` velocities are retained and network connectivity is
 unchanged. After wall removal and expansion, the system equilibrates for 1M
