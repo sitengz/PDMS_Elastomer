@@ -25,6 +25,12 @@ The independent mechanical-test generator can be built with:
 make bin/tensile_test_generator
 ```
 
+The independent extended layer-dynamics generator can be built with:
+
+```bash
+make bin/layer_dynamics_generator
+```
+
 ## Components and molecule IDs
 
 Molecule IDs are consecutive and grouped in this order:
@@ -342,6 +348,37 @@ TENSILE_OUTPUT_DIR=/path/tensile \
   bash simulations/ARCHITECTURE/GEOMETRY/run_tensile.sh
 ```
 
+## Extended layer dynamics
+
+The original model workflow retains its established 1M-step MSD trajectory.
+For the longer layer-resolved dynamics study, use the independent
+`run_layer_dynamics.sh` beside `run.sh` and `run_tensile.sh`:
+
+```bash
+bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
+```
+
+The runner automatically reads the same final `.npt_eq` and version-3
+`.info` pair. It creates `<case>/layer_dynamics/` containing a fixed-box,
+300 K NVT input, a versioned layer-dynamics `.info`, and a Nova submission
+script. The source `.npt_eq` velocities are retained, network connectivity is
+unchanged, and no additional minimization or box equilibration is performed.
+
+The default production is 10M steps (50 ns). To preserve early-time
+resolution without making the trajectory ten times larger, frames are written
+every 1,000 steps (5 ps) through the first 1M steps and every 10,000 steps
+(50 ps) through the remaining 9M steps. The expected trajectory contains
+1,901 frames with `x y z ix iy iz`, beginning at timestep zero. For example,
+to request 20M total steps while retaining the same sampling schedule:
+
+```bash
+bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh \
+  --production-steps 20000000
+```
+
+Nonstandard source locations use `NPT_EQ_FILE` and `INFO_FILE`, as in the
+tensile runner. Set `LAYER_DYNAMICS_OUTPUT_DIR` to override the output folder.
+
 ## Analysis
 
 The topology-first analyzers read `data.<case>.npt_eq` and the matching
@@ -373,6 +410,8 @@ columns, and the film/Z1+ boundary caveat.
 - `Generator/pdms_elastomer_generator.cpp`: generic model generator;
 - `Generator/tensile_test_generator.cpp`: post-equilibration tensile-test
   generator for bulk and in-plane film loading;
+- `Generator/layer_dynamics_generator.cpp`: extended fixed-box trajectory
+  generator for origin-layer-resolved dynamics;
 - `examples/01_default/`: reproducible current-default sample;
 - `examples/02_ring_bifunctional/`: ring strands with two regular reactive sites;
 - `examples/03_ring_tetrafunctional/`: ring strands with four random reactive sites;
@@ -390,7 +429,9 @@ columns, and the film/Z1+ boundary caveat.
   z profiles, and layer dynamics;
 - `tests/smoke_test.sh`: model-generator and analyzer regression checks;
 - `tests/tensile_generator_test.sh`: bulk, film, and auto-detection tensile
-  generator checks.
+  generator checks;
+- `tests/layer_dynamics_generator_test.sh`: extended bulk/film dynamics and
+  auto-detection checks.
 
 ## References
 

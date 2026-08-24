@@ -100,3 +100,20 @@ the film for film systems. These are independent jobs under
 Environment overrides are available for copied or reorganized results:
 `NPT_EQ_FILE`, `INFO_FILE`, `TENSILE_OUTPUT_DIR`, and `TENSILE_MODE`. Additional
 tensile-generator command-line options can be appended to `run_tensile.sh`.
+
+## Extended layer-dynamics generation
+
+Every geometry folder also contains `run_layer_dynamics.sh`. It uses the same
+automatic `.npt_eq` and `.info` lookup but creates one fixed-box, 300 K NVT
+job per system rather than separate loading directions:
+
+```bash
+bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
+```
+
+The default 10M-step (50 ns) trajectory samples every 1,000 steps through the
+first 1M steps and every 10,000 steps thereafter. This gives 1,901 frames and
+retains the short-time resolution of the original trajectory while extending
+the observation time tenfold. Outputs are stored under
+`<case>/layer_dynamics/`. Use `LAYER_DYNAMICS_OUTPUT_DIR` for a nonstandard
+destination, or append generator options such as `--production-steps`.

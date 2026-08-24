@@ -5,7 +5,7 @@ BIN := bin
 .PHONY: all clean test
 
 all: $(BIN)/pdms_elastomer_generator $(BIN)/tensile_test_generator \
-	$(BIN)/topology_analyzer \
+	$(BIN)/layer_dynamics_generator $(BIN)/topology_analyzer \
 	$(BIN)/basic_network_analyzer $(BIN)/network_profile_analyzer
 
 $(BIN):
@@ -15,6 +15,9 @@ $(BIN)/pdms_elastomer_generator: Generator/pdms_elastomer_generator.cpp Generato
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 $(BIN)/tensile_test_generator: Generator/tensile_test_generator.cpp Generator/pdms_filler_component.hpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(BIN)/layer_dynamics_generator: Generator/layer_dynamics_generator.cpp Generator/pdms_filler_component.hpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 $(BIN)/topology_analyzer: Analysis/topology_analyzer.cpp Analysis/network_common.hpp | $(BIN)
@@ -29,6 +32,7 @@ $(BIN)/network_profile_analyzer: Analysis/network_profile_analyzer.cpp Analysis/
 test: all
 	bash tests/smoke_test.sh
 	bash tests/tensile_generator_test.sh
+	bash tests/layer_dynamics_generator_test.sh
 
 clean:
 	rm -rf $(BIN)

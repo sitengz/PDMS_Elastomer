@@ -222,6 +222,19 @@ Add the production trajectory for layer-resolved dynamics:
     --trajectory dump.msd.lammpstrj --bin-width 5 --frame-stride 1
 ```
 
+For the independent extended trajectory, point the same analyzer at the
+layer-dynamics output:
+
+```bash
+./bin/network_profile_analyzer data.CASE.npt_eq CASE.info \
+    --trajectory layer_dynamics/dump.layer_dynamics.CASE.lammpstrj \
+    --bin-width 5 --frame-stride 1
+```
+
+The extended trajectory uses dense early-time and coarser long-time frame
+spacing. The analyzer reads each recorded timestep directly, so it does not
+assume uniform frame intervals.
+
 `layer_dynamics.<case>.tsv` groups component-1 beads by their first-frame z
 layer and reports x, y, z, in-plane, and total MSD relative to that frame.
 Whole-system center-of-mass drift is removed. The generated trajectory's
