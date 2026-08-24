@@ -368,12 +368,14 @@ unchanged and periodic.
 
 The source `.npt_eq` velocities are retained and network connectivity is
 unchanged. After wall removal and expansion, the system equilibrates for 1M
-steps (5 ns) and writes `data.<case>.free_surface_eq`. The dynamics clock and
-MSD origin are then reset for a separate 5M-step (25 ns) production. Frames
-are written every 1,000 steps (5 ps) through the first production 1M steps and
-every 5,000 steps (25 ps) through the remaining 4M steps. The expected
-trajectory contains 1,801 frames with `x y z ix iy iz`, beginning at
-production timestep zero. For example,
+steps (5 ns) and writes `data.<case>.free_surface_eq`. A 20,000-step (100 ps)
+Debye-Waller segment is then written every 20 steps (0.1 ps) to
+`dump.debye_waller.<case>.lammpstrj`. After that segment, the dynamics clock
+and MSD origin are reset for an independent 5M-step (25 ns) production in
+`dump.layer_dynamics.<case>.lammpstrj`. MSD frames are written every 1,000
+steps (5 ps) through the first production 1M steps and every 5,000 steps
+(25 ps) through the remaining 4M steps. The two expected trajectories contain
+1,001 and 1,801 frames, respectively, with `x y z ix iy iz`. For example,
 to request 20M total steps while retaining the same sampling schedule:
 
 ```bash
@@ -405,8 +407,9 @@ unavailable until a validated primitive-path result is supplied. The third
 analyzer reports component density, local conversion, reaction, defect,
 contour, conformation, and orientation profiles along z. It also writes
 folded wall-distance and wall/core summary tables, optionally reads
-`Z1+SP.dat` for kink and primitive-path profiles, and can use
-`dump.msd.lammpstrj` for origin-layer-resolved dynamics. See
+`Z1+SP.dat` for kink and primitive-path profiles, and can use separate
+high-frequency Debye-Waller and long-time MSD dumps for
+origin-layer-resolved dynamics. See
 [`Analysis/README.md`](Analysis/README.md) for commands, definitions, output
 columns, and the film/Z1+ boundary caveat.
 

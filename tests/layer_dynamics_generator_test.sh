@@ -50,14 +50,20 @@ for input in "$bulk_input" "$film_input"; do
     test -f "$input"
     grep -q '^comm_modify     cutoff 25$' "$input"
     grep -q '^pair_style      lj/gromacs 12 15$' "$input"
-    grep -q '^reset_timestep  0$' "$input"
+    test "$(grep -c '^reset_timestep  0$' "$input")" -eq 2
+    grep -q '^compute         global_dw all msd com yes$' "$input"
     grep -q '^compute         global_msd all msd com yes$' "$input"
-    grep -q '^dump            layer all custom 1000 dump.layer_dynamics.' "$input"
-    grep -q '^dump_modify     layer first yes sort id$' "$input"
-    grep -q '^dump_modify     layer every 5000 first no$' "$input"
+    grep -q '^dump            dw all custom 20 dump.debye_waller.' "$input"
+    grep -q '^dump_modify     dw first yes sort id$' "$input"
+    grep -q '^run             20000$' "$input"
+    grep -q '^undump          dw$' "$input"
+    grep -q '^dump            msd all custom 1000 dump.layer_dynamics.' "$input"
+    grep -q '^dump_modify     msd first yes sort id$' "$input"
+    grep -q '^dump_modify     msd every 5000 first no$' "$input"
     test "$(grep -c '^run             1000000$' "$input")" -eq 2
     grep -q '^run             4000000$' "$input"
-    grep -q '^fix             integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
+    grep -q '^fix             dw_integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
+    grep -q '^fix             msd_integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
     if grep -Eq '^(velocity|minimize|fix +xlink|fix +deform_box)' "$input"; then
         echo "Layer-dynamics input unexpectedly changes the source state or topology" >&2
         exit 1
@@ -74,11 +80,15 @@ grep -q '^write_data      data.dynamics_film.free_surface_eq nocoeff$' "$film_in
 
 film_info="$test_root/dynamics_film/layer_dynamics/layer_dynamics.dynamics_film.info"
 grep -q '"surface_equilibration_steps": 1000000' "$film_info"
+grep -q '"debye_waller_steps": 20000' "$film_info"
+grep -q '"debye_waller_duration_ps": 100.0000000000' "$film_info"
+grep -q '"debye_waller_dump_every_ps": 0.1000000000' "$film_info"
+grep -q '"expected_debye_waller_frames": 1001' "$film_info"
 grep -q '"production_steps": 5000000' "$film_info"
 grep -q '"production_duration_ns": 25.0000000000' "$film_info"
-grep -q '"expected_trajectory_frames": 1801' "$film_info"
+grep -q '"expected_msd_trajectory_frames": 1801' "$film_info"
 grep -q '"source_velocities_retained": true' "$film_info"
-grep -q '"trajectory_first_frame_is_origin": true' "$film_info"
+grep -q '"each_trajectory_first_frame_is_origin": true' "$film_info"
 grep -q '"source_walls_recreated": false' "$film_info"
 grep -q '"free_surfaces": true' "$film_info"
 grep -q '"vacuum_padding_per_side_angstrom": 20.0000000000' "$film_info"

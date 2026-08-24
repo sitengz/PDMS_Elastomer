@@ -8,6 +8,7 @@ using namespace pdms_analysis;
 struct Options {
     std::string data_file;
     std::string info_file;
+    std::string debye_waller_trajectory_file;
     std::string trajectory_file;
     std::string z1_sp_file;
     bool disable_z1 = false;
@@ -16,6 +17,9 @@ struct Options {
     double wall_fraction = 0.20;
     double core_fraction = 0.20;
     double diffusion_fit_start_fraction = 0.50;
+    double debye_waller_time_ps = std::numeric_limits<double>::quiet_NaN();
+    double debye_waller_search_start_ps = 0.50;
+    double debye_waller_search_end_ps = 20.0;
     long long frame_stride = 1;
 };
 
@@ -945,6 +949,199 @@ void write_profile_summary(
     }
 }
 
+struct DebyeWallerFrame {
+    long long frame = 0;
+    long long timestep = 0;
+    double time_ps = 0.0;
+    Vec3 drift;
+    Vec3 global_msd;
+    std::vector<Vec3> layer_msd;
+};
+
+double inverse_or_nan(double value) {
+    return value > 0.0 ? 1.0 / value :
+        std::numeric_limits<double>::quiet_NaN();
+}
+
+void write_debye_waller(
+    const std::filesystem::path &global_path,
+    const std::filesystem::path &layer_path,
+    const Options &options, const ModelInfo &info, const DataFile &data) {
+    DumpReader reader(options.debye_waller_trajectory_file);
+    DumpFrame origin;
+    if (!reader.next(origin, data.declared_atoms))
+        throw std::runtime_error("Debye-Waller trajectory contains no frames");
+    const int bins = std::max(1, static_cast<int>(
+        std::ceil(origin.box.lz() / options.bin_width)));
+    const double width = origin.box.lz() / bins;
+    std::vector<int> origin_bin(origin.unwrapped.size(), -1);
+    std::vector<long long> bin_counts(static_cast<std::size_t>(bins), 0);
+    long long selected_beads = 0;
+    for (long long id = 1; id <= data.declared_atoms; ++id) {
+        const Atom &atom = data.atoms[static_cast<std::size_t>(id)];
+        if (component_for_molecule(atom.molecule, info) != kStrand) continue;
+        const int bin = bin_index(origin.unwrapped[static_cast<std::size_t>(id)].z,
+                                  origin.box, bins, info.periodic_z());
+        origin_bin[static_cast<std::size_t>(id)] = bin;
+        ++bin_counts[static_cast<std::size_t>(bin)];
+        ++selected_beads;
+    }
+    if (selected_beads == 0)
+        throw std::runtime_error("Debye-Waller trajectory has no component-1 beads");
+
+    std::vector<DebyeWallerFrame> frames;
+    long long frame_index = 0;
+    DumpFrame current = origin;
+    while (true) {
+        if (frame_index % options.frame_stride == 0) {
+            DebyeWallerFrame sampled;
+            sampled.frame = frame_index;
+            sampled.timestep = current.timestep;
+            sampled.time_ps =
+                (current.timestep - origin.timestep) * info.timestep_fs * 1.0e-3;
+            for (long long id = 1; id <= data.declared_atoms; ++id)
+                sampled.drift += current.unwrapped[static_cast<std::size_t>(id)] -
+                                 origin.unwrapped[static_cast<std::size_t>(id)];
+            sampled.drift = (1.0 / data.declared_atoms) * sampled.drift;
+            std::vector<Vec3> sums(static_cast<std::size_t>(bins));
+            Vec3 global_sum;
+            for (long long id = 1; id <= data.declared_atoms; ++id) {
+                const int bin = origin_bin[static_cast<std::size_t>(id)];
+                if (bin < 0) continue;
+                const Vec3 displacement =
+                    current.unwrapped[static_cast<std::size_t>(id)] -
+                    origin.unwrapped[static_cast<std::size_t>(id)] - sampled.drift;
+                Vec3 squared{displacement.x * displacement.x,
+                             displacement.y * displacement.y,
+                             displacement.z * displacement.z};
+                sums[static_cast<std::size_t>(bin)] += squared;
+                global_sum += squared;
+            }
+            sampled.global_msd = (1.0 / selected_beads) * global_sum;
+            sampled.layer_msd.resize(static_cast<std::size_t>(bins));
+            for (int bin = 0; bin < bins; ++bin) {
+                const long long count = bin_counts[static_cast<std::size_t>(bin)];
+                sampled.layer_msd[static_cast<std::size_t>(bin)] = count > 0
+                    ? (1.0 / count) * sums[static_cast<std::size_t>(bin)]
+                    : Vec3{std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::quiet_NaN()};
+            }
+            frames.push_back(std::move(sampled));
+        }
+        ++frame_index;
+        if (!reader.next(current, data.declared_atoms)) break;
+    }
+    if (frames.size() < 3)
+        throw std::runtime_error(
+            "Debye-Waller trajectory needs at least three sampled frames");
+
+    std::vector<double> logarithmic_slope(
+        frames.size(), std::numeric_limits<double>::quiet_NaN());
+    for (std::size_t index = 1; index + 1 < frames.size(); ++index) {
+        const double first_time = frames[index - 1].time_ps;
+        const double last_time = frames[index + 1].time_ps;
+        const Vec3 first_msd = frames[index - 1].global_msd;
+        const Vec3 last_msd = frames[index + 1].global_msd;
+        const double first_total = first_msd.x + first_msd.y + first_msd.z;
+        const double last_total = last_msd.x + last_msd.y + last_msd.z;
+        if (first_time > 0.0 && last_time > first_time &&
+            first_total > 0.0 && last_total > 0.0)
+            logarithmic_slope[index] =
+                std::log(last_total / first_total) /
+                std::log(last_time / first_time);
+    }
+
+    std::size_t selected = 1;
+    std::string selection_method;
+    if (std::isfinite(options.debye_waller_time_ps)) {
+        double nearest = std::numeric_limits<double>::infinity();
+        for (std::size_t index = 1; index < frames.size(); ++index) {
+            const double distance =
+                std::fabs(frames[index].time_ps - options.debye_waller_time_ps);
+            if (distance < nearest) {
+                nearest = distance;
+                selected = index;
+            }
+        }
+        selection_method = "explicit_nearest_frame";
+    } else {
+        double minimum_slope = std::numeric_limits<double>::infinity();
+        bool found = false;
+        for (std::size_t index = 1; index + 1 < frames.size(); ++index) {
+            if (frames[index].time_ps < options.debye_waller_search_start_ps ||
+                frames[index].time_ps > options.debye_waller_search_end_ps ||
+                !std::isfinite(logarithmic_slope[index])) continue;
+            if (logarithmic_slope[index] < minimum_slope) {
+                minimum_slope = logarithmic_slope[index];
+                selected = index;
+                found = true;
+            }
+        }
+        if (found) {
+            selection_method = "minimum_logarithmic_slope";
+        } else {
+            constexpr double kFallbackTimePs = 4.0;
+            double nearest = std::numeric_limits<double>::infinity();
+            for (std::size_t index = 1; index < frames.size(); ++index) {
+                const double distance =
+                    std::fabs(frames[index].time_ps - kFallbackTimePs);
+                if (distance < nearest) {
+                    nearest = distance;
+                    selected = index;
+                }
+            }
+            selection_method = "fallback_nearest_4ps";
+        }
+    }
+
+    std::ofstream global(global_path);
+    if (!global) throw std::runtime_error("cannot write " + global_path.string());
+    global << "frame\ttimestep\ttime_ps\tstrand_beads"
+        << "\tmsd_x_A2\tmsd_y_A2\tmsd_z_A2\tu2_xy_A2\tu2_3D_A2"
+        << "\tlog_slope_u2_3D\tdrift_x_A\tdrift_y_A\tdrift_z_A\tselected\n";
+    global << std::setprecision(12);
+    for (std::size_t index = 0; index < frames.size(); ++index) {
+        const DebyeWallerFrame &frame = frames[index];
+        const double xy = frame.global_msd.x + frame.global_msd.y;
+        global << frame.frame << '\t' << frame.timestep << '\t' << frame.time_ps
+            << '\t' << selected_beads << '\t' << frame.global_msd.x << '\t'
+            << frame.global_msd.y << '\t' << frame.global_msd.z << '\t'
+            << xy << '\t' << xy + frame.global_msd.z << '\t'
+            << logarithmic_slope[index] << '\t' << frame.drift.x << '\t'
+            << frame.drift.y << '\t' << frame.drift.z << '\t'
+            << (index == selected ? 1 : 0) << '\n';
+    }
+
+    const DebyeWallerFrame &dw = frames[selected];
+    const double global_xy = dw.global_msd.x + dw.global_msd.y;
+    const double global_total = global_xy + dw.global_msd.z;
+    std::ofstream layer(layer_path);
+    if (!layer) throw std::runtime_error("cannot write " + layer_path.string());
+    layer << "bin\tzlo_origin_A\tzhi_origin_A\tstrand_beads"
+        << "\tselected_time_ps\tselection_method\tlog_slope_u2_3D"
+        << "\tu2_x_A2\tu2_y_A2\tu2_z_A2\tu2_xy_A2\tu2_3D_A2"
+        << "\tu2_xy_over_global\tu2_3D_over_global"
+        << "\tlocal_stiffness_xy_A-2\tlocal_stiffness_3D_A-2"
+        << "\tstiffness_xy_over_global\tstiffness_3D_over_global\n";
+    layer << std::setprecision(12);
+    for (int bin = 0; bin < bins; ++bin) {
+        const Vec3 value = dw.layer_msd[static_cast<std::size_t>(bin)];
+        const double xy = value.x + value.y;
+        const double total = xy + value.z;
+        const double zlo = origin.box.zlo + bin * width;
+        layer << bin + 1 << '\t' << zlo << '\t' << zlo + width << '\t'
+            << bin_counts[static_cast<std::size_t>(bin)] << '\t' << dw.time_ps
+            << '\t' << selection_method << '\t' << logarithmic_slope[selected]
+            << '\t' << value.x << '\t' << value.y << '\t' << value.z << '\t'
+            << xy << '\t' << total << '\t' << ratio_or_nan(xy, global_xy)
+            << '\t' << ratio_or_nan(total, global_total) << '\t'
+            << inverse_or_nan(xy) << '\t' << inverse_or_nan(total) << '\t'
+            << ratio_or_nan(global_xy, xy) << '\t'
+            << ratio_or_nan(global_total, total) << '\n';
+    }
+}
+
 void write_layer_dynamics(
     const std::filesystem::path &msd_path,
     const std::filesystem::path &diffusion_path,
@@ -1108,6 +1305,21 @@ void write_report(
             << "Z1+ kink definition: primitive-path points with nonzero kink flag\n"
             << "Z1+ scaling: none; result box lengths must match the snapshot\n";
     }
+    if (options.debye_waller_trajectory_file.empty()) {
+        out << "Debye-Waller analysis: not requested\n";
+    } else {
+        out << "Debye-Waller trajectory: "
+            << options.debye_waller_trajectory_file << "\n"
+            << "Debye-Waller selection: component-1 layer MSD with whole-system"
+            << " COM drift removed\n";
+        if (std::isfinite(options.debye_waller_time_ps))
+            out << "Debye-Waller requested time: "
+                << options.debye_waller_time_ps << " ps (nearest frame)\n";
+        else
+            out << "Debye-Waller time: minimum global 3D MSD logarithmic slope"
+                << " from " << options.debye_waller_search_start_ps << " to "
+                << options.debye_waller_search_end_ps << " ps\n";
+    }
     if (options.trajectory_file.empty()) {
         out << "layer dynamics: not requested\n";
     } else {
@@ -1131,6 +1343,7 @@ void print_help(const char *program) {
     std::cout
         << "Usage: " << program << " <case>.npt_eq <case>.info [options]\n\n"
         << "Options:\n"
+        << "  --dw-trajectory FILE optional high-frequency Debye-Waller dump\n"
         << "  --trajectory FILE    optional dump.msd.lammpstrj for layer MSD\n"
         << "  --z1-sp FILE         override the default Z1+SP.dat path\n"
         << "  --no-z1              disable default Z1+SP.dat auto-detection\n"
@@ -1140,6 +1353,10 @@ void print_help(const char *program) {
         << "  --frame-stride N     analyze every Nth trajectory frame (default 1)\n"
         << "  --diffusion-fit-start-fraction X\n"
         << "                      fit D over final 1-X fraction (default 0.50)\n"
+        << "  --dw-time-ps X       use the nearest DW frame to X ps\n"
+        << "  --dw-search-start-ps X\n"
+        << "                      automatic DW search start (default 0.50 ps)\n"
+        << "  --dw-search-end-ps X automatic DW search end (default 20 ps)\n"
         << "  --output-dir PATH    output directory (default analysis_<case>)\n"
         << "  --help               show this help\n";
 }
@@ -1158,7 +1375,9 @@ Options parse_options(int argc, char **argv) {
             if (++index >= argc) throw std::runtime_error("missing value for " + option);
             return std::string(argv[index]);
         };
-        if (option == "--trajectory") options.trajectory_file = value();
+        if (option == "--dw-trajectory")
+            options.debye_waller_trajectory_file = value();
+        else if (option == "--trajectory") options.trajectory_file = value();
         else if (option == "--z1-sp" || option == "--z1-results")
             options.z1_sp_file = value();
         else if (option == "--no-z1") options.disable_z1 = true;
@@ -1170,6 +1389,12 @@ Options parse_options(int argc, char **argv) {
         else if (option == "--frame-stride") options.frame_stride = std::stoll(value());
         else if (option == "--diffusion-fit-start-fraction")
             options.diffusion_fit_start_fraction = std::stod(value());
+        else if (option == "--dw-time-ps")
+            options.debye_waller_time_ps = std::stod(value());
+        else if (option == "--dw-search-start-ps")
+            options.debye_waller_search_start_ps = std::stod(value());
+        else if (option == "--dw-search-end-ps")
+            options.debye_waller_search_end_ps = std::stod(value());
         else if (option == "--output-dir") options.output_directory = value();
         else if (option == "--help") { print_help(argv[0]); std::exit(0); }
         else throw std::runtime_error("unknown option: " + option);
@@ -1186,6 +1411,14 @@ Options parse_options(int argc, char **argv) {
           options.diffusion_fit_start_fraction < 1.0))
         throw std::runtime_error(
             "diffusion fit start fraction must be at least 0 and less than 1");
+    if (std::isfinite(options.debye_waller_time_ps) &&
+        !(options.debye_waller_time_ps > 0.0))
+        throw std::runtime_error("Debye-Waller time must be positive");
+    if (!(options.debye_waller_search_start_ps > 0.0) ||
+        !(options.debye_waller_search_end_ps >
+          options.debye_waller_search_start_ps))
+        throw std::runtime_error(
+            "Debye-Waller search times must satisfy 0 < start < end");
     return options;
 }
 
@@ -1224,6 +1457,11 @@ int main(int argc, char **argv) {
         write_profile_summary(
             directory / ("network_z_profile_summary." + name + ".tsv"),
             profile, data, info, options, z1 != nullptr);
+        if (!options.debye_waller_trajectory_file.empty())
+            write_debye_waller(
+                directory / ("debye_waller_global." + name + ".tsv"),
+                directory / ("layer_debye_waller." + name + ".tsv"),
+                options, info, data);
         if (!options.trajectory_file.empty())
             write_layer_dynamics(
                 directory / ("layer_dynamics." + name + ".tsv"),

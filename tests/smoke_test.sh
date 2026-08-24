@@ -950,13 +950,37 @@ awk '
 profile_analysis="$test_root/profile_analysis"
 "$profile_analyzer" "$ring_final" \
     "$ring_bifunctional_dir/ring_bifunctional.info" \
-    --trajectory "$trajectory" --z1-sp "$z1_sp" --bin-width 20 \
+    --dw-trajectory "$trajectory" --trajectory "$trajectory" \
+    --z1-sp "$z1_sp" --bin-width 20 \
     --output-dir "$profile_analysis" >/dev/null
 test -s "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
 test -s "$profile_analysis/network_z_profile_folded.ring_bifunctional.tsv"
 test -s "$profile_analysis/network_z_profile_summary.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_diffusion.ring_bifunctional.tsv"
+test -s "$profile_analysis/debye_waller_global.ring_bifunctional.tsv"
+test -s "$profile_analysis/layer_debye_waller.ring_bifunctional.tsv"
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    $header["selected"] == 1 &&
+    $header["time_ps"] > 0 &&
+    $header["log_slope_u2_3D"] > 0.99 &&
+    $header["log_slope_u2_3D"] < 1.01 { found = 1 }
+    END { exit !found }
+' "$profile_analysis/debye_waller_global.ring_bifunctional.tsv"
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    $header["strand_beads"] > 0 &&
+    $header["u2_3D_A2"] > 0 &&
+    $header["local_stiffness_3D_A-2"] > 0 { found = 1 }
+    END { exit !found }
+' "$profile_analysis/layer_debye_waller.ring_bifunctional.tsv"
 awk 'NR > 1 && $1 == 1 && $11 > 0 { found = 1 } END { exit !found }' \
     "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
 grep -q $'^bin\tzlo_origin_A\tzhi_origin_A\tstrand_beads\tfit_start_ns' \

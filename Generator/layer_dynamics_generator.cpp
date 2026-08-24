@@ -25,6 +25,8 @@ struct Settings {
     std::filesystem::path source_info;
     std::filesystem::path output_directory;
     long long surface_equilibration_steps = 1000000;
+    long long debye_waller_steps = 20000;
+    long long debye_waller_dump_every = 20;
     long long production_steps = 5000000;
     long long early_steps = 1000000;
     long long early_dump_every = 1000;
@@ -47,7 +49,8 @@ struct OutputFiles {
     std::string input;
     std::string submit;
     std::string info;
-    std::string trajectory;
+    std::string debye_waller_trajectory;
+    std::string msd_trajectory;
     std::string equilibrated_data;
     std::string final_data;
 };
@@ -60,6 +63,8 @@ struct OutputFiles {
         << "Options:\n"
         << "  --output-dir DIR          default: <source folder>/layer_dynamics\n"
         << "  --surface-equilibration-steps N  default: 1000000 (5 ns)\n"
+        << "  --dw-steps N              default: 20000 (100 ps)\n"
+        << "  --dw-dump-every N         default: 20 steps (0.1 ps)\n"
         << "  --production-steps N      default: 5000000 (25 ns)\n"
         << "  --early-steps N           default: 1000000 (5 ns)\n"
         << "  --early-dump-every N      default: 1000 steps (5 ps)\n"
@@ -191,6 +196,10 @@ Settings parse_arguments(int argc, char** argv) {
         else if (option == "--output-dir") settings.output_directory = value();
         else if (option == "--surface-equilibration-steps")
             settings.surface_equilibration_steps = parse_positive_integer(value(), option);
+        else if (option == "--dw-steps")
+            settings.debye_waller_steps = parse_positive_integer(value(), option);
+        else if (option == "--dw-dump-every")
+            settings.debye_waller_dump_every = parse_positive_integer(value(), option);
         else if (option == "--production-steps")
             settings.production_steps = parse_positive_integer(value(), option);
         else if (option == "--early-steps")
@@ -213,6 +222,8 @@ Settings parse_arguments(int argc, char** argv) {
         usage(argv[0], "provide one .npt_eq file and its matching .info file");
     if (settings.early_steps > settings.production_steps)
         usage(argv[0], "--early-steps cannot exceed --production-steps");
+    if (settings.debye_waller_steps % settings.debye_waller_dump_every != 0)
+        usage(argv[0], "--dw-steps must be divisible by --dw-dump-every");
     if (settings.early_steps % settings.early_dump_every != 0)
         usage(argv[0], "--early-steps must be divisible by --early-dump-every");
     if (settings.early_steps % settings.long_dump_every != 0 ||
@@ -272,7 +283,10 @@ OutputFiles output_files(const SourceInfo& info) {
     files.input = "in.layer_dynamics." + info.case_name;
     files.submit = "submit.layer_dynamics." + info.case_name + ".sh";
     files.info = "layer_dynamics." + info.case_name + ".info";
-    files.trajectory = "dump.layer_dynamics." + info.case_name + ".lammpstrj";
+    files.debye_waller_trajectory =
+        "dump.debye_waller." + info.case_name + ".lammpstrj";
+    files.msd_trajectory =
+        "dump.layer_dynamics." + info.case_name + ".lammpstrj";
     files.equilibrated_data = info.geometry == "film"
         ? "data." + info.case_name + ".free_surface_eq"
         : "data." + info.case_name + ".layer_dynamics_eq";
@@ -335,32 +349,47 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
         << "run             " << settings.surface_equilibration_steps << "\n"
         << "unfix           equilibrate\n"
         << "write_data      " << files.equilibrated_data << " nocoeff\n\n"
-        << "# Start dynamics from the equilibrated free-surface state.\n"
+        << "# Short, high-frequency trajectory for the Debye-Waller displacement.\n"
+        << "reset_timestep  0\n"
+        << "compute         global_dw all msd com yes\n"
+        << "thermo          " << settings.thermo_every << "\n"
+        << "thermo_style    custom step time temp density lx ly lz"
+        << " c_global_dw[1] c_global_dw[2] c_global_dw[3] c_global_dw[4]"
+        << " etotal epair ebond eangle edihed\n"
+        << "thermo_modify   flush yes\n\n"
+        << "# First frame is the Debye-Waller displacement origin.\n"
+        << "dump            dw all custom " << settings.debye_waller_dump_every << ' '
+        << files.debye_waller_trajectory << " id mol type x y z ix iy iz\n"
+        << "dump_modify     dw first yes sort id\n"
+        << "fix             dw_integrate all nvt temp " << kTemperatureK << ' '
+        << kTemperatureK << " 50.0\n\n"
+        << "run             " << settings.debye_waller_steps << "\n"
+        << "unfix           dw_integrate\n"
+        << "undump          dw\n"
+        << "uncompute       global_dw\n\n"
+        << "# Reset the reference for the independent long-time layer-MSD trajectory.\n"
         << "reset_timestep  0\n"
         << "compute         global_msd all msd com yes\n"
-        << "thermo          " << settings.thermo_every << "\n"
         << "thermo_style    custom step time temp density lx ly lz"
         << " c_global_msd[1] c_global_msd[2] c_global_msd[3] c_global_msd[4]"
         << " etotal epair ebond eangle edihed\n"
-        << "thermo_modify   flush yes\n\n"
-        << "# First frame is the origin used by network_profile_analyzer.\n"
-        << "dump            layer all custom " << settings.early_dump_every << ' '
-        << files.trajectory << " id mol type x y z ix iy iz\n"
-        << "dump_modify     layer first yes sort id\n\n"
-        << "fix             integrate all nvt temp " << kTemperatureK << ' '
+        << "dump            msd all custom " << settings.early_dump_every << ' '
+        << files.msd_trajectory << " id mol type x y z ix iy iz\n"
+        << "dump_modify     msd first yes sort id\n"
+        << "fix             msd_integrate all nvt temp " << kTemperatureK << ' '
         << kTemperatureK << " 50.0\n\n"
-        << "# Production early-time window: dense sampling through "
+        << "# MSD early-time window: dense sampling through "
         << settings.early_steps * kTimestepFs * 1.0e-6 << " ns.\n"
         << "run             " << settings.early_steps << "\n";
     if (long_steps > 0) {
         output << "\n# Production long-time window: coarser sampling through "
             << settings.production_steps * kTimestepFs * 1.0e-6 << " ns.\n"
-            << "dump_modify     layer every " << settings.long_dump_every
+            << "dump_modify     msd every " << settings.long_dump_every
             << " first no\n"
             << "run             " << long_steps << "\n";
     }
-    output << "\nunfix           integrate\n"
-        << "undump          layer\n"
+    output << "\nunfix           msd_integrate\n"
+        << "undump          msd\n"
         << "uncompute       global_msd\n"
         << "write_data      " << files.final_data << " nocoeff\n"
         << "print           \"Layer-dynamics production completed: "
@@ -405,10 +434,12 @@ void write_info_file(const Settings& settings, const SourceInfo& info,
     const long long expected_frames =
         settings.early_steps / settings.early_dump_every + 1 +
         (settings.production_steps - settings.early_steps) / settings.long_dump_every;
+    const long long expected_dw_frames =
+        settings.debye_waller_steps / settings.debye_waller_dump_every + 1;
     output << std::fixed << std::setprecision(10)
         << "{\n"
         << "  \"format\": \"pdms-elastomer-layer-dynamics-info\",\n"
-        << "  \"format_version\": 1,\n"
+        << "  \"format_version\": 2,\n"
         << "  \"case_name\": \"" << json_escape(info.case_name) << "\",\n"
         << "  \"architecture\": \"" << json_escape(info.architecture) << "\",\n"
         << "  \"geometry\": \"" << info.geometry << "\",\n"
@@ -422,7 +453,9 @@ void write_info_file(const Settings& settings, const SourceInfo& info,
         << "  \"files\": {\n"
         << "    \"lammps_input\": \"" << files.input << "\",\n"
         << "    \"slurm_submit\": \"" << files.submit << "\",\n"
-        << "    \"trajectory\": \"" << files.trajectory << "\",\n"
+        << "    \"debye_waller_trajectory\": \""
+        << files.debye_waller_trajectory << "\",\n"
+        << "    \"msd_trajectory\": \"" << files.msd_trajectory << "\",\n"
         << "    \"equilibrated_data\": \"" << files.equilibrated_data << "\",\n"
         << "    \"final_data\": \"" << files.final_data << "\"\n"
         << "  },\n"
@@ -435,6 +468,14 @@ void write_info_file(const Settings& settings, const SourceInfo& info,
         << settings.surface_equilibration_steps << ",\n"
         << "    \"surface_equilibration_duration_ns\": "
         << settings.surface_equilibration_steps * kTimestepFs * 1.0e-6 << ",\n"
+        << "    \"debye_waller_steps\": " << settings.debye_waller_steps << ",\n"
+        << "    \"debye_waller_duration_ps\": "
+        << settings.debye_waller_steps * kTimestepFs * 1.0e-3 << ",\n"
+        << "    \"debye_waller_dump_every_steps\": "
+        << settings.debye_waller_dump_every << ",\n"
+        << "    \"debye_waller_dump_every_ps\": "
+        << settings.debye_waller_dump_every * kTimestepFs * 1.0e-3 << ",\n"
+        << "    \"expected_debye_waller_frames\": " << expected_dw_frames << ",\n"
         << "    \"production_steps\": " << settings.production_steps << ",\n"
         << "    \"production_duration_ns\": "
         << settings.production_steps * kTimestepFs * 1.0e-6 << ",\n"
@@ -442,8 +483,8 @@ void write_info_file(const Settings& settings, const SourceInfo& info,
         << "    \"velocity_reinitialization\": false,\n"
         << "    \"box_dimensions_fixed_during_production\": true,\n"
         << "    \"trajectory_coordinates\": \"wrapped x y z plus ix iy iz\",\n"
-        << "    \"trajectory_first_frame_is_origin\": true,\n"
-        << "    \"trajectory_schedule\": [\n"
+        << "    \"each_trajectory_first_frame_is_origin\": true,\n"
+        << "    \"msd_trajectory_schedule\": [\n"
         << "      {\"start_step\": 0, \"end_step\": " << settings.early_steps
         << ", \"dump_every_steps\": " << settings.early_dump_every
         << ", \"dump_every_ps\": "
@@ -454,7 +495,7 @@ void write_info_file(const Settings& settings, const SourceInfo& info,
         << ", \"dump_every_ps\": "
         << settings.long_dump_every * kTimestepFs * 1.0e-3 << "}\n"
         << "    ],\n"
-        << "    \"expected_trajectory_frames\": " << expected_frames << "\n"
+        << "    \"expected_msd_trajectory_frames\": " << expected_frames << "\n"
         << "  },\n"
         << "  \"film\": {\n"
         << "    \"nominal_material_thickness_angstrom\": ";
@@ -474,12 +515,17 @@ void write_info_file(const Settings& settings, const SourceInfo& info,
         << "  },\n"
         << "  \"analysis_contract\": {\n"
         << "    \"analyzer\": \"network_profile_analyzer\",\n"
-        << "    \"trajectory_option\": \"--trajectory " << files.trajectory << "\",\n"
+        << "    \"debye_waller_trajectory_option\": \"--dw-trajectory "
+        << files.debye_waller_trajectory << "\",\n"
+        << "    \"msd_trajectory_option\": \"--trajectory "
+        << files.msd_trajectory << "\",\n"
         << "    \"layer_assignment\": \"component-1 beads grouped by first-frame z\",\n"
         << "    \"displacement_reference\": \"first trajectory frame\",\n"
         << "    \"drift_correction\": \"whole-system center-of-mass displacement\",\n"
-        << "    \"reported_components\": [\"MSD_x\", \"MSD_y\", \"MSD_z\","
-        << " \"MSD_parallel\", \"MSD_total\", \"D_xy\", \"D_3D\"],\n"
+        << "    \"reported_components\": [\"u2_xy\", \"u2_3D\","
+        << " \"local_stiffness_xy\", \"local_stiffness_3D\","
+        << " \"MSD_x\", \"MSD_y\", \"MSD_z\", \"MSD_parallel\","
+        << " \"MSD_total\", \"D_xy\", \"D_3D\"],\n"
         << "    \"diffusion_definitions\": {\"D_xy\": \"slope(MSD_parallel)/4\","
         << " \"D_3D\": \"slope(MSD_total)/6\"}\n"
         << "  }\n"

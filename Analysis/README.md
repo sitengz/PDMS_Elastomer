@@ -227,13 +227,28 @@ layer-dynamics output:
 
 ```bash
 ./bin/network_profile_analyzer data.CASE.npt_eq CASE.info \
+    --dw-trajectory layer_dynamics/dump.debye_waller.CASE.lammpstrj \
     --trajectory layer_dynamics/dump.layer_dynamics.CASE.lammpstrj \
     --bin-width 5 --frame-stride 1
 ```
 
-The extended trajectory uses dense early-time and coarser long-time frame
-spacing. The analyzer reads each recorded timestep directly, so it does not
-assume uniform frame intervals.
+The two dumps have independent displacement origins. The 100 ps
+Debye-Waller dump is sampled every 0.1 ps; the 25 ns MSD dump uses dense
+early-time and coarser long-time spacing. The analyzer reads each recorded
+timestep directly, so it does not assume uniform frame intervals.
+
+`debye_waller_global.<case>.tsv` reports the component-1 short-time MSD and
+its centered logarithmic slope. By default, the Debye-Waller time is the
+minimum global 3D-MSD slope from 0.5 to 20 ps. Override the selected time with
+`--dw-time-ps X`, or change the automatic interval with
+`--dw-search-start-ps X` and `--dw-search-end-ps X`.
+
+`layer_debye_waller.<case>.tsv` reports `u2_xy`, `u2_3D`, their ratios to the
+global component-1 values, and the local-stiffness proxies `1/u2_xy` and
+`1/u2_3D` at the selected time. Layers are assigned from the first
+Debye-Waller frame and whole-system center-of-mass drift is removed. These
+are simulation Debye-Waller displacements; conversion to a scattering
+attenuation factor additionally requires a chosen scattering vector.
 
 `layer_dynamics.<case>.tsv` groups component-1 beads by their first-frame z
 layer and reports x, y, z, in-plane, and total MSD relative to that frame.
@@ -242,7 +257,7 @@ Whole-system center-of-mass drift is removed. The generated trajectory's
 
 The layer MSD is an origin-layer observable, not a time-origin-averaged MSD.
 For films, x/y or the in-plane sum is normally the relevant mobility measure,
-while z reflects confinement.
+while z reflects the actual trajectory boundary condition.
 
 The same run writes `layer_diffusion.<case>.tsv`. For every origin layer it
 fits the final half of the recorded trajectory by default and reports

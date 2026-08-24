@@ -113,8 +113,10 @@ bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
 
 For films, no wall fixes are restored and the z box is expanded by 20 A at
 each side. The resulting free-surface state equilibrates for 1M steps and is
-written to `data.<case>.free_surface_eq`. A separate 5M-step (25 ns)
-production samples every 1,000 steps through its first 1M steps and every
-5,000 steps thereafter, giving 1,801 frames. Outputs are stored under
-`<case>/layer_dynamics/`. Use `LAYER_DYNAMICS_OUTPUT_DIR` for a nonstandard
-destination, or append generator options such as `--production-steps`.
+written to `data.<case>.free_surface_eq`. The job next writes an independent
+100 ps Debye-Waller dump every 0.1 ps (1,001 frames), resets the dynamics
+origin, and runs a 5M-step (25 ns) MSD production. The MSD dump samples every
+1,000 steps through its first 1M steps and every 5,000 steps thereafter,
+giving 1,801 frames. Outputs are stored under `<case>/layer_dynamics/`. Use
+`LAYER_DYNAMICS_OUTPUT_DIR` for a nonstandard destination, or append generator
+options such as `--dw-steps`, `--dw-dump-every`, or `--production-steps`.
