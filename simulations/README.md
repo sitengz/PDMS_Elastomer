@@ -111,7 +111,7 @@ system rather than separate loading directions:
 bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh
 ```
 
-For films, no wall fixes are restored and the z box is expanded by 20 A at
+For films, no wall fixes are restored and the z box is expanded by 50 A at
 each side. The resulting free-surface state equilibrates for 1M steps and is
 written to `data.<case>.free_surface_eq`. The job next writes an independent
 100 ps Debye-Waller dump every 0.1 ps (1,001 frames), resets the dynamics

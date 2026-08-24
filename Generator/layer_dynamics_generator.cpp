@@ -33,7 +33,7 @@ struct Settings {
     long long long_dump_every = 5000;
     long long thermo_every = 1000;
     long long restart_every = 1000000;
-    double film_vacuum_padding_per_side = 20.0;
+    double film_vacuum_padding_per_side = 50.0;
 };
 
 struct SourceInfo {
@@ -69,7 +69,7 @@ struct OutputFiles {
         << "  --early-steps N           default: 1000000 (5 ns)\n"
         << "  --early-dump-every N      default: 1000 steps (5 ps)\n"
         << "  --long-dump-every N       default: 5000 steps (25 ps)\n"
-        << "  --film-padding X          vacuum added to each z side; default: 20 A\n"
+        << "  --film-padding X          vacuum added to each z side; default: 50 A\n"
         << "  --thermo-every N          default: 1000\n"
         << "  --restart-every N         default: 1000000\n"
         << "  --help\n";

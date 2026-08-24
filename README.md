@@ -362,7 +362,7 @@ The runner automatically reads the same final `.npt_eq` and version-3
 `.info` pair. It creates `<case>/layer_dynamics/` containing a 300 K NVT
 input, a versioned layer-dynamics `.info`, and a Nova submission script. For
 a film, the source wall fixes are not recreated and the nonperiodic z box is
-expanded by 20 A at each boundary without remapping atoms. This produces two
+expanded by 50 A at each boundary without remapping atoms. This produces two
 free surfaces with vacuum buffers for unreacted chains. Bulk boxes remain
 unchanged and periodic.
 

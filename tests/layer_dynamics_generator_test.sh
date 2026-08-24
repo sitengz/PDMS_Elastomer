@@ -74,7 +74,7 @@ grep -q '^boundary        p p p$' "$bulk_input"
 test "$(grep -c 'wall/lj126' "$bulk_input")" -eq 0
 grep -q '^boundary        p p f$' "$film_input"
 test "$(grep -c 'wall/lj126' "$film_input")" -eq 0
-grep -q '^change_box      all z delta -20.000000000 20.000000000 units box$' \
+grep -q '^change_box      all z delta -50.000000000 50.000000000 units box$' \
     "$film_input"
 grep -q '^write_data      data.dynamics_film.free_surface_eq nocoeff$' "$film_input"
 
@@ -91,7 +91,7 @@ grep -q '"source_velocities_retained": true' "$film_info"
 grep -q '"each_trajectory_first_frame_is_origin": true' "$film_info"
 grep -q '"source_walls_recreated": false' "$film_info"
 grep -q '"free_surfaces": true' "$film_info"
-grep -q '"vacuum_padding_per_side_angstrom": 20.0000000000' "$film_info"
+grep -q '"vacuum_padding_per_side_angstrom": 50.0000000000' "$film_info"
 
 test -x "$test_root/dynamics_film/layer_dynamics/submit.layer_dynamics.dynamics_film.sh"
 
