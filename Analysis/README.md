@@ -4,7 +4,7 @@ The analyzers use the final LAMMPS data snapshot, normally
 `data.<case>.npt_eq`, together with the matching version-3 `<case>.info` file.
 They recognize linear, ring, star, and grafted component-1 architectures.
 
-Build all three programs from the repository root:
+Build all four programs from the repository root:
 
 ```bash
 make
@@ -250,6 +250,23 @@ Debye-Waller frame and whole-system center-of-mass drift is removed. These
 are simulation Debye-Waller displacements; conversion to a scattering
 attenuation factor additionally requires a chosen scattering vector.
 
+The original first-frame Debye-Waller outputs remain the default. Add sampled
+time origins without replacing them:
+
+```bash
+./bin/network_profile_analyzer data.CASE.npt_eq CASE.info \
+    --dw-trajectory layer_dynamics/dump.debye_waller.CASE.lammpstrj \
+    --time-averaged-dw --dw-time-ps 10 \
+    --dw-time-origin-count 10 --dw-time-origin-stride 100 \
+    --bin-width 5
+```
+
+This additionally writes `debye_waller_time_averaged.<case>.tsv` and
+`layer_debye_waller_time_averaged.<case>.tsv`. Component-1 beads are reassigned
+to their origin-time z layer for every selected origin. The global table keeps
+the complete time-averaged short-lag curve; the layer table contains the
+selected lag. Directional x, y, z, in-plane, and 3D values are all retained.
+
 `layer_dynamics.<case>.tsv` groups component-1 beads by their first-frame z
 layer and reports x, y, z, in-plane, and total MSD relative to that frame.
 Whole-system center-of-mass drift is removed. The generated trajectory's
@@ -304,3 +321,43 @@ diffusive regime was not resolved rather than being silently replaced by
 zero. Change the fit window with
 `--diffusion-fit-start-fraction X`, where the default `0.50` uses the final
 half of the production duration.
+
+## 4. Fixed-lag origin-resolved dynamics
+
+The fixed-lag analyzer extracts the standard comparison values without the
+quadratic cost of calculating every possible lag:
+
+```bash
+./bin/fixed_lag_dynamics_analyzer data.CASE.npt_eq CASE.info \
+    --msd-trajectory layer_dynamics/dump.layer_dynamics.CASE.lammpstrj \
+    --dw-trajectory layer_dynamics/dump.debye_waller.CASE.lammpstrj
+```
+
+Defaults are `MSD_xy(10 ns)`, its Einstein ratio
+`D_xy=MSD_xy/(4*10 ns)`, and `u2_3D(10 ps)`. Every dump frame that has a
+recorded partner at the requested lag is used as an origin. Because only one
+lag is evaluated, runtime is linear in trajectory length rather than quadratic.
+Use `--origin-stride N` to thin origins, `--msd-lag-ns X` or `--dw-lag-ps X`
+to override the standard lags, and `--bin-width X` to control z resolution.
+
+For films, origin-layer z coordinates are aligned to the instantaneous
+component-1 midplane by default so slow translation of the free-standing film
+does not smear the profile. Use `--no-film-recenter` for absolute dump-box z.
+The displacement itself always removes the whole-system number-weighted mean
+translation. Long-time film interpretation should emphasize xy; z and 3D
+values remain available but confined z motion is not automatically interpreted
+as diffusion.
+
+Outputs in `analysis_<case>/` are:
+
+- `fixed_lag_msd_origins.<case>.tsv` and
+  `fixed_lag_u2_origins.<case>.tsv`: one global row per time origin;
+- `fixed_lag_msd_layers.<case>.tsv` and
+  `fixed_lag_u2_layers.<case>.tsv`: one row per origin and z layer;
+- `fixed_lag_msd_layer_summary.<case>.tsv` and
+  `fixed_lag_u2_layer_summary.<case>.tsv`: origin means and origin SD values;
+- `fixed_lag_summary.<case>.tsv` and `fixed_lag_report.<case>.txt`.
+
+Origin SD values describe within-trajectory variation. Neighboring origins are
+correlated, so use the origin-resolved tables for block bootstrap or jackknife
+confidence intervals; do not treat all origins as independent replicas.

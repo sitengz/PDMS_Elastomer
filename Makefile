@@ -6,7 +6,8 @@ BIN := bin
 
 all: $(BIN)/pdms_elastomer_generator $(BIN)/tensile_test_generator \
 	$(BIN)/layer_dynamics_generator $(BIN)/topology_analyzer \
-	$(BIN)/basic_network_analyzer $(BIN)/network_profile_analyzer
+	$(BIN)/basic_network_analyzer $(BIN)/network_profile_analyzer \
+	$(BIN)/fixed_lag_dynamics_analyzer
 
 $(BIN):
 	mkdir -p $(BIN)
@@ -29,11 +30,15 @@ $(BIN)/basic_network_analyzer: Analysis/basic_network_analyzer.cpp Analysis/netw
 $(BIN)/network_profile_analyzer: Analysis/network_profile_analyzer.cpp Analysis/network_common.hpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+$(BIN)/fixed_lag_dynamics_analyzer: Analysis/fixed_lag_dynamics_analyzer.cpp Analysis/network_common.hpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 test: all
 	bash tests/smoke_test.sh
 	bash tests/tensile_generator_test.sh
 	bash tests/layer_dynamics_generator_test.sh
 	bash tests/profile_analysis_submit_test.sh
+	bash tests/fixed_lag_dynamics_test.sh
 
 clean:
 	rm -rf $(BIN)

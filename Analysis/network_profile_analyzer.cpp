@@ -24,6 +24,9 @@ struct Options {
     bool time_averaged_msd = false;
     long long time_origin_stride = 100;
     long long time_origin_count = 10;
+    bool time_averaged_dw = false;
+    long long dw_time_origin_stride = 100;
+    long long dw_time_origin_count = 10;
 };
 
 constexpr double kAvogadroAngstrom = 0.602214076;
@@ -1295,6 +1298,243 @@ Vec3 system_center(const DumpFrame &frame, long long atom_count) {
     return (1.0 / atom_count) * center;
 }
 
+void write_time_averaged_debye_waller(
+    const std::filesystem::path &global_path,
+    const std::filesystem::path &layer_path,
+    const Options &options, const ModelInfo &info, const DataFile &data) {
+    DumpReader reader(options.debye_waller_trajectory_file);
+    DumpFrame reference;
+    if (!reader.next(reference, data.declared_atoms))
+        throw std::runtime_error("Debye-Waller trajectory contains no frames");
+    const int bins = std::max(1, static_cast<int>(
+        std::ceil(reference.box.lz() / options.bin_width)));
+    const double width = reference.box.lz() / bins;
+
+    std::vector<long long> strand_ids;
+    strand_ids.reserve(static_cast<std::size_t>(data.declared_atoms));
+    for (long long id = 1; id <= data.declared_atoms; ++id) {
+        const Atom &atom = data.atoms[static_cast<std::size_t>(id)];
+        if (component_for_molecule(atom.molecule, info) == kStrand)
+            strand_ids.push_back(id);
+    }
+    if (strand_ids.empty())
+        throw std::runtime_error(
+            "Debye-Waller trajectory has no component-1 beads");
+
+    std::vector<TimeOriginFrame> origins;
+    origins.reserve(static_cast<std::size_t>(options.dw_time_origin_count));
+    std::map<long long, TimeAveragedLag> lag_accumulators;
+    long long frame_index = 0;
+    long long sampled_frame_index = 0;
+    DumpFrame current = reference;
+    while (true) {
+        if (frame_index % options.frame_stride == 0) {
+            const Vec3 current_center =
+                system_center(current, data.declared_atoms);
+            if (sampled_frame_index % options.dw_time_origin_stride == 0 &&
+                static_cast<long long>(origins.size()) <
+                    options.dw_time_origin_count) {
+                TimeOriginFrame origin;
+                origin.timestep = current.timestep;
+                origin.system_center = current_center;
+                origin.strand_positions.reserve(strand_ids.size());
+                origin.strand_bins.reserve(strand_ids.size());
+                origin.bin_counts.assign(static_cast<std::size_t>(bins), 0);
+                for (const long long id : strand_ids) {
+                    const Vec3 position =
+                        current.unwrapped[static_cast<std::size_t>(id)];
+                    const int bin = bin_index(
+                        position.z, reference.box, bins, info.periodic_z());
+                    origin.strand_positions.push_back(position);
+                    origin.strand_bins.push_back(bin);
+                    ++origin.bin_counts[static_cast<std::size_t>(bin)];
+                }
+                origins.push_back(std::move(origin));
+            }
+
+            for (const TimeOriginFrame &origin : origins) {
+                const long long lag_steps = current.timestep - origin.timestep;
+                if (lag_steps < 0)
+                    throw std::runtime_error(
+                        "Debye-Waller timesteps are not monotonically increasing");
+                auto inserted = lag_accumulators.try_emplace(lag_steps, bins);
+                TimeAveragedLag &lag = inserted.first->second;
+                ++lag.time_origins;
+                const Vec3 drift = current_center - origin.system_center;
+                lag.drift_sum += drift;
+                for (int bin = 0; bin < bins; ++bin)
+                    lag.observations[static_cast<std::size_t>(bin)] +=
+                        origin.bin_counts[static_cast<std::size_t>(bin)];
+                for (std::size_t index = 0; index < strand_ids.size(); ++index) {
+                    const long long id = strand_ids[index];
+                    const int bin = origin.strand_bins[index];
+                    const Vec3 displacement =
+                        current.unwrapped[static_cast<std::size_t>(id)] -
+                        origin.strand_positions[index] - drift;
+                    Vec3 &sum = lag.squared_sum[static_cast<std::size_t>(bin)];
+                    sum.x += displacement.x * displacement.x;
+                    sum.y += displacement.y * displacement.y;
+                    sum.z += displacement.z * displacement.z;
+                }
+            }
+            ++sampled_frame_index;
+        }
+        ++frame_index;
+        if (!reader.next(current, data.declared_atoms)) break;
+    }
+    if (origins.size() < 2)
+        throw std::runtime_error(
+            "time-averaged Debye-Waller analysis needs at least two origins; "
+            "reduce --dw-time-origin-stride or increase "
+            "--dw-time-origin-count");
+    if (lag_accumulators.size() < 3)
+        throw std::runtime_error(
+            "time-averaged Debye-Waller analysis needs at least three lags");
+
+    std::vector<long long> lag_steps;
+    std::vector<const TimeAveragedLag *> lags;
+    std::vector<double> time_ps;
+    std::vector<Vec3> global_msd;
+    std::vector<long long> global_observations;
+    for (const auto &entry : lag_accumulators) {
+        lag_steps.push_back(entry.first);
+        lags.push_back(&entry.second);
+        time_ps.push_back(entry.first * info.timestep_fs * 1.0e-3);
+        Vec3 sum;
+        long long observations = 0;
+        for (int bin = 0; bin < bins; ++bin) {
+            sum += entry.second.squared_sum[static_cast<std::size_t>(bin)];
+            observations +=
+                entry.second.observations[static_cast<std::size_t>(bin)];
+        }
+        global_observations.push_back(observations);
+        global_msd.push_back(observations > 0
+            ? (1.0 / observations) * sum
+            : Vec3{std::numeric_limits<double>::quiet_NaN(),
+                   std::numeric_limits<double>::quiet_NaN(),
+                   std::numeric_limits<double>::quiet_NaN()});
+    }
+
+    std::vector<double> logarithmic_slope(
+        lags.size(), std::numeric_limits<double>::quiet_NaN());
+    for (std::size_t index = 1; index + 1 < lags.size(); ++index) {
+        const double first_total = global_msd[index - 1].x +
+            global_msd[index - 1].y + global_msd[index - 1].z;
+        const double last_total = global_msd[index + 1].x +
+            global_msd[index + 1].y + global_msd[index + 1].z;
+        if (time_ps[index - 1] > 0.0 &&
+            time_ps[index + 1] > time_ps[index - 1] &&
+            first_total > 0.0 && last_total > 0.0)
+            logarithmic_slope[index] =
+                std::log(last_total / first_total) /
+                std::log(time_ps[index + 1] / time_ps[index - 1]);
+    }
+
+    std::size_t selected = 1;
+    std::string selection_method;
+    if (std::isfinite(options.debye_waller_time_ps)) {
+        double nearest = std::numeric_limits<double>::infinity();
+        for (std::size_t index = 1; index < lags.size(); ++index) {
+            const double distance =
+                std::fabs(time_ps[index] - options.debye_waller_time_ps);
+            if (distance < nearest) {
+                nearest = distance;
+                selected = index;
+            }
+        }
+        selection_method = "explicit_nearest_lag";
+    } else {
+        double minimum_slope = std::numeric_limits<double>::infinity();
+        bool found = false;
+        for (std::size_t index = 1; index + 1 < lags.size(); ++index) {
+            if (time_ps[index] < options.debye_waller_search_start_ps ||
+                time_ps[index] > options.debye_waller_search_end_ps ||
+                !std::isfinite(logarithmic_slope[index])) continue;
+            if (logarithmic_slope[index] < minimum_slope) {
+                minimum_slope = logarithmic_slope[index];
+                selected = index;
+                found = true;
+            }
+        }
+        if (found) {
+            selection_method = "minimum_logarithmic_slope";
+        } else {
+            constexpr double kFallbackTimePs = 4.0;
+            double nearest = std::numeric_limits<double>::infinity();
+            for (std::size_t index = 1; index < lags.size(); ++index) {
+                const double distance =
+                    std::fabs(time_ps[index] - kFallbackTimePs);
+                if (distance < nearest) {
+                    nearest = distance;
+                    selected = index;
+                }
+            }
+            selection_method = "fallback_nearest_4ps";
+        }
+    }
+
+    std::ofstream global(global_path);
+    if (!global) throw std::runtime_error("cannot write " + global_path.string());
+    global << "lag_index\tlag_steps\ttime_ps\ttime_origins"
+        << "\tstrand_bead_observations"
+        << "\tmsd_x_A2\tmsd_y_A2\tmsd_z_A2\tu2_xy_A2\tu2_3D_A2"
+        << "\tlog_slope_u2_3D\tmean_drift_x_A\tmean_drift_y_A"
+        << "\tmean_drift_z_A\tselected\n";
+    global << std::setprecision(12);
+    for (std::size_t index = 0; index < lags.size(); ++index) {
+        const Vec3 value = global_msd[index];
+        const double xy = value.x + value.y;
+        const Vec3 mean_drift =
+            (1.0 / lags[index]->time_origins) * lags[index]->drift_sum;
+        global << index << '\t' << lag_steps[index] << '\t' << time_ps[index]
+            << '\t' << lags[index]->time_origins << '\t'
+            << global_observations[index] << '\t' << value.x << '\t'
+            << value.y << '\t' << value.z << '\t' << xy << '\t'
+            << xy + value.z << '\t' << logarithmic_slope[index] << '\t'
+            << mean_drift.x << '\t' << mean_drift.y << '\t'
+            << mean_drift.z << '\t' << (index == selected ? 1 : 0) << '\n';
+    }
+
+    const TimeAveragedLag &dw = *lags[selected];
+    const double global_xy =
+        global_msd[selected].x + global_msd[selected].y;
+    const double global_total = global_xy + global_msd[selected].z;
+    std::ofstream layer(layer_path);
+    if (!layer) throw std::runtime_error("cannot write " + layer_path.string());
+    layer << "bin\tzlo_origin_A\tzhi_origin_A\ttime_origins"
+        << "\tstrand_bead_observations\tmean_strand_beads_per_origin"
+        << "\tselected_time_ps\tselection_method\tlog_slope_u2_3D"
+        << "\tu2_x_A2\tu2_y_A2\tu2_z_A2\tu2_xy_A2\tu2_3D_A2"
+        << "\tu2_xy_over_global\tu2_3D_over_global"
+        << "\tlocal_stiffness_xy_A-2\tlocal_stiffness_3D_A-2"
+        << "\tstiffness_xy_over_global\tstiffness_3D_over_global\n";
+    layer << std::setprecision(12);
+    for (int bin = 0; bin < bins; ++bin) {
+        const long long observations =
+            dw.observations[static_cast<std::size_t>(bin)];
+        const Vec3 value = observations > 0
+            ? (1.0 / observations) *
+                dw.squared_sum[static_cast<std::size_t>(bin)]
+            : Vec3{std::numeric_limits<double>::quiet_NaN(),
+                   std::numeric_limits<double>::quiet_NaN(),
+                   std::numeric_limits<double>::quiet_NaN()};
+        const double xy = value.x + value.y;
+        const double total = xy + value.z;
+        const double zlo = reference.box.zlo + bin * width;
+        layer << bin + 1 << '\t' << zlo << '\t' << zlo + width << '\t'
+            << dw.time_origins << '\t' << observations << '\t'
+            << static_cast<double>(observations) / dw.time_origins << '\t'
+            << time_ps[selected] << '\t' << selection_method << '\t'
+            << logarithmic_slope[selected] << '\t' << value.x << '\t'
+            << value.y << '\t' << value.z << '\t' << xy << '\t' << total
+            << '\t' << ratio_or_nan(xy, global_xy) << '\t'
+            << ratio_or_nan(total, global_total) << '\t'
+            << inverse_or_nan(xy) << '\t' << inverse_or_nan(total) << '\t'
+            << ratio_or_nan(global_xy, xy) << '\t'
+            << ratio_or_nan(global_total, total) << '\n';
+    }
+}
+
 void write_time_averaged_layer_dynamics(
     const std::filesystem::path &msd_path,
     const std::filesystem::path &diffusion_path,
@@ -1550,6 +1790,16 @@ void write_report(
             out << "Debye-Waller time: minimum global 3D MSD logarithmic slope"
                 << " from " << options.debye_waller_search_start_ps << " to "
                 << options.debye_waller_search_end_ps << " ps\n";
+        if (options.time_averaged_dw) {
+            out << "time-averaged Debye-Waller analysis: enabled\n"
+                << "Debye-Waller time-origin layer assignment: component-1 beads"
+                << " are reassigned by z at each selected origin\n"
+                << "Debye-Waller time-origin selection: at most "
+                << options.dw_time_origin_count << " origins, every "
+                << options.dw_time_origin_stride << " sampled frames\n";
+        } else {
+            out << "time-averaged Debye-Waller analysis: not requested\n";
+        }
     }
     if (options.trajectory_file.empty()) {
         out << "layer dynamics: not requested\n";
@@ -1599,6 +1849,11 @@ void print_help(const char *program) {
         << "                      spacing between time origins in sampled frames (default 100)\n"
         << "  --time-origin-count N\n"
         << "                      maximum selected time origins (default 10)\n"
+        << "  --time-averaged-dw   also calculate Debye-Waller MSD over sampled origins\n"
+        << "  --dw-time-origin-stride N\n"
+        << "                      DW origin spacing in sampled frames (default 100)\n"
+        << "  --dw-time-origin-count N\n"
+        << "                      maximum selected DW origins (default 10)\n"
         << "  --diffusion-fit-start-fraction X\n"
         << "                      fit D over final 1-X fraction (default 0.50)\n"
         << "  --dw-time-ps X       use the nearest DW frame to X ps\n"
@@ -1641,6 +1896,12 @@ Options parse_options(int argc, char **argv) {
             options.time_origin_stride = std::stoll(value());
         else if (option == "--time-origin-count")
             options.time_origin_count = std::stoll(value());
+        else if (option == "--time-averaged-dw")
+            options.time_averaged_dw = true;
+        else if (option == "--dw-time-origin-stride")
+            options.dw_time_origin_stride = std::stoll(value());
+        else if (option == "--dw-time-origin-count")
+            options.dw_time_origin_count = std::stoll(value());
         else if (option == "--diffusion-fit-start-fraction")
             options.diffusion_fit_start_fraction = std::stod(value());
         else if (option == "--dw-time-ps")
@@ -1665,8 +1926,18 @@ Options parse_options(int argc, char **argv) {
         throw std::runtime_error("time-origin stride must be positive");
     if (options.time_origin_count < 2)
         throw std::runtime_error("time-origin count must be at least 2");
+    if (options.dw_time_origin_stride < 1)
+        throw std::runtime_error(
+            "Debye-Waller time-origin stride must be positive");
+    if (options.dw_time_origin_count < 2)
+        throw std::runtime_error(
+            "Debye-Waller time-origin count must be at least 2");
     if (options.time_averaged_msd && options.trajectory_file.empty())
         throw std::runtime_error("--time-averaged-msd requires --trajectory");
+    if (options.time_averaged_dw &&
+        options.debye_waller_trajectory_file.empty())
+        throw std::runtime_error(
+            "--time-averaged-dw requires --dw-trajectory");
     if (!(options.diffusion_fit_start_fraction >= 0.0 &&
           options.diffusion_fit_start_fraction < 1.0))
         throw std::runtime_error(
@@ -1721,6 +1992,13 @@ int main(int argc, char **argv) {
             write_debye_waller(
                 directory / ("debye_waller_global." + name + ".tsv"),
                 directory / ("layer_debye_waller." + name + ".tsv"),
+                options, info, data);
+        if (options.time_averaged_dw)
+            write_time_averaged_debye_waller(
+                directory /
+                    ("debye_waller_time_averaged." + name + ".tsv"),
+                directory /
+                    ("layer_debye_waller_time_averaged." + name + ".tsv"),
                 options, info, data);
         if (!options.trajectory_file.empty())
             write_layer_dynamics(

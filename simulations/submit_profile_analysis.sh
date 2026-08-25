@@ -110,7 +110,13 @@ run_worker() {
             echo "Missing Debye-Waller trajectory: $dw_trajectory_file" >&2
             exit 2
         fi
-        command+=(--dw-trajectory "$dw_trajectory_file")
+        command+=(
+            --dw-trajectory "$dw_trajectory_file"
+            --time-averaged-dw
+            --dw-time-ps 10
+            --dw-time-origin-count "$origin_count"
+            --dw-time-origin-stride "$origin_stride"
+        )
     fi
 
     echo "Case: $case_name"

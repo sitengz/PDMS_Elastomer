@@ -148,5 +148,6 @@ Use `--time-origin-count`, `--time-origin-stride`, `--frame-stride`, and
 `--bin-width` to change the analyzer settings. Each case writes into
 `<case>/analysis_<case>/`, including the original first-frame tables and the
 new `layer_dynamics_time_averaged.<case>.tsv` and
-`layer_diffusion_time_averaged.<case>.tsv` tables. The Debye-Waller dump is
-included when present and otherwise skipped with an explicit job-log message.
+`layer_diffusion_time_averaged.<case>.tsv` tables. When the Debye-Waller dump
+is present, the launcher also enables the 10 ps time-averaged Debye-Waller
+outputs; otherwise it is skipped with an explicit job-log message.

@@ -411,7 +411,10 @@ contour, conformation, and orientation profiles along z. It also writes
 folded wall-distance and wall/core summary tables, optionally reads
 `Z1+SP.dat` for kink and primitive-path profiles, and can use separate
 high-frequency Debye-Waller and long-time MSD dumps for
-origin-layer-resolved dynamics. See
+origin-layer-resolved dynamics. A fourth fixed-lag analyzer uses every valid
+time origin to extract the standard 10 ns MSD and Einstein ratio together with
+the 10 ps Debye-Waller displacement, preserving directional and layer-resolved
+values for uncertainty analysis. See
 [`Analysis/README.md`](Analysis/README.md) for commands, definitions, output
 columns, and the film/Z1+ boundary caveat.
 
