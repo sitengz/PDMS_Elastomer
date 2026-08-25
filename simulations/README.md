@@ -123,3 +123,30 @@ origin, and runs a 5M-step (25 ns) MSD production. The MSD dump samples every
 giving 1,801 frames. Outputs are stored under `<case>/layer_dynamics/`. Use
 `LAYER_DYNAMICS_OUTPUT_DIR` for a nonstandard destination, or append generator
 options such as `--dw-steps`, `--dw-dump-every`, or `--production-steps`.
+
+## Slurm profile-analysis submission
+
+After the dynamics dumps are complete, the general launcher discovers the
+standard case layout and submits one serial Nova job for every complete case
+below the requested search root:
+
+```bash
+bash simulations/submit_profile_analysis.sh simulations/01_linear_reference
+```
+
+Search the complete 24-system matrix by passing `simulations`, or validate the
+detected paths and generated `sbatch` commands first with `--dry-run`. The
+default time-averaged calculation selects at most 10 origins separated by 100
+analyzed frames:
+
+```bash
+bash simulations/submit_profile_analysis.sh --dry-run simulations
+bash simulations/submit_profile_analysis.sh simulations
+```
+
+Use `--time-origin-count`, `--time-origin-stride`, `--frame-stride`, and
+`--bin-width` to change the analyzer settings. Each case writes into
+`<case>/analysis_<case>/`, including the original first-frame tables and the
+new `layer_dynamics_time_averaged.<case>.tsv` and
+`layer_diffusion_time_averaged.<case>.tsv` tables. The Debye-Waller dump is
+included when present and otherwise skipped with an explicit job-log message.

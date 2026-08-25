@@ -33,6 +33,7 @@ test: all
 	bash tests/smoke_test.sh
 	bash tests/tensile_generator_test.sh
 	bash tests/layer_dynamics_generator_test.sh
+	bash tests/profile_analysis_submit_test.sh
 
 clean:
 	rm -rf $(BIN)
