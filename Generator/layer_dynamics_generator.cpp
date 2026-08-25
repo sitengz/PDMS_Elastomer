@@ -402,6 +402,10 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
     }
     output << "\nunfix           msd_integrate\n"
         << "undump          msd\n"
+        << "# Remove compute-dependent thermo fields before deleting the MSD compute.\n"
+        << "thermo_style    custom step time temp density lx ly lz"
+        << " etotal epair ebond eangle edihed\n"
+        << "thermo_modify   flush yes\n"
         << "uncompute       global_msd\n"
         << "write_data      " << files.final_data << " nocoeff\n"
         << "print           \"Layer-dynamics production completed: "

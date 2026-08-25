@@ -64,6 +64,17 @@ for input in "$bulk_input" "$film_input"; do
     grep -q '^run             4000000$' "$input"
     grep -q '^fix             dw_integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
     grep -q '^fix             msd_integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
+    awk '
+        /^thermo_style    custom step time temp density lx ly lz etotal epair ebond eangle edihed$/ {
+            clean_thermo = NR
+        }
+        /^uncompute       global_msd$/ { uncompute = NR }
+        /^write_data      data\..*\.layer_dynamics_final nocoeff$/ { write_data = NR }
+        END {
+            exit !(clean_thermo > 0 && clean_thermo < uncompute &&
+                   uncompute < write_data)
+        }
+    ' "$input"
     if grep -Eq '^(velocity|minimize|fix +xlink|fix +deform_box)' "$input"; then
         echo "Layer-dynamics input unexpectedly changes the source state or topology" >&2
         exit 1
