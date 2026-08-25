@@ -951,6 +951,7 @@ profile_analysis="$test_root/profile_analysis"
 "$profile_analyzer" "$ring_final" \
     "$ring_bifunctional_dir/ring_bifunctional.info" \
     --dw-trajectory "$trajectory" --trajectory "$trajectory" \
+    --time-averaged-msd --time-origin-stride 2 --time-origin-count 3 \
     --z1-sp "$z1_sp" --bin-width 20 \
     --output-dir "$profile_analysis" >/dev/null
 test -s "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
@@ -958,6 +959,8 @@ test -s "$profile_analysis/network_z_profile_folded.ring_bifunctional.tsv"
 test -s "$profile_analysis/network_z_profile_summary.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_diffusion.ring_bifunctional.tsv"
+test -s "$profile_analysis/layer_dynamics_time_averaged.ring_bifunctional.tsv"
+test -s "$profile_analysis/layer_diffusion_time_averaged.ring_bifunctional.tsv"
 test -s "$profile_analysis/debye_waller_global.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_debye_waller.ring_bifunctional.tsv"
 awk -F '\t' '
@@ -983,8 +986,23 @@ awk -F '\t' '
 ' "$profile_analysis/layer_debye_waller.ring_bifunctional.tsv"
 awk 'NR > 1 && $1 == 1 && $11 > 0 { found = 1 } END { exit !found }' \
     "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
+awk -F '\t' '
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    $header["lag_steps"] == 1000 &&
+    $header["time_origins"] == 3 &&
+    $header["strand_bead_observations"] > 0 &&
+    $header["msd_parallel_A2"] > 0 { found = 1 }
+    END { exit !found }
+' "$profile_analysis/layer_dynamics_time_averaged.ring_bifunctional.tsv"
+grep -q '^time-averaged layer MSD: enabled' \
+    "$profile_analysis/profile_report.ring_bifunctional.txt"
 grep -q $'^bin\tzlo_origin_A\tzhi_origin_A\tstrand_beads\tfit_start_ns' \
     "$profile_analysis/layer_diffusion.ring_bifunctional.tsv"
+grep -q $'^bin\tzlo_origin_A\tzhi_origin_A\tmean_strand_beads_per_origin' \
+    "$profile_analysis/layer_diffusion_time_averaged.ring_bifunctional.tsv"
 awk -F '\t' '
     NR == 1 {
         for (column = 1; column <= NF; ++column) header[$column] = column

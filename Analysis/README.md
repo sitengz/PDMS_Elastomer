@@ -259,6 +259,36 @@ The layer MSD is an origin-layer observable, not a time-origin-averaged MSD.
 For films, x/y or the in-plane sum is normally the relevant mobility measure,
 while z reflects the actual trajectory boundary condition.
 
+Multiple-time-origin layer MSD can be calculated in the same run without
+changing the original outputs:
+
+```bash
+./bin/network_profile_analyzer data.CASE.npt_eq CASE.info \
+    --trajectory layer_dynamics/dump.layer_dynamics.CASE.lammpstrj \
+    --time-averaged-msd --time-origin-count 10 --time-origin-stride 100 \
+    --bin-width 5
+```
+
+This additionally writes `layer_dynamics_time_averaged.<case>.tsv` and
+`layer_diffusion_time_averaged.<case>.tsv`. For every selected time origin,
+component-1 beads are reassigned to the layer containing their z coordinate at
+that origin. Displacements at later frames use that origin position and remove
+the whole-system center-of-mass displacement for the same frame pair. Results
+with the same exact timestep lag are then averaged over origins and beads.
+The output records both the number of contributing time origins and the total
+bead observations at every lag and layer.
+
+The default selects at most 10 origins separated by 100 analyzed frames. This
+bounded sampling is deliberate because an exact all-origin, bead-resolved
+calculation scales quadratically with trajectory length. Reduce
+`--time-origin-stride` or increase `--time-origin-count` for denser statistics;
+the memory and runtime increase approximately linearly with the number of
+selected origins. `--frame-stride` is applied first, so the time-origin stride
+is measured in analyzed frames. The original first-frame files remain useful
+for direct comparison and are always retained. The time-averaged diffusion fit
+ends at the largest lag still sampled by at least half of the selected origins;
+the requested fit-start fraction is applied to that better-sampled lag range.
+
 The same run writes `layer_diffusion.<case>.tsv`. For every origin layer it
 fits the final half of the recorded trajectory by default and reports
 

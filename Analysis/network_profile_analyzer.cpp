@@ -21,6 +21,9 @@ struct Options {
     double debye_waller_search_start_ps = 0.50;
     double debye_waller_search_end_ps = 20.0;
     long long frame_stride = 1;
+    bool time_averaged_msd = false;
+    long long time_origin_stride = 100;
+    long long time_origin_count = 10;
 };
 
 constexpr double kAvogadroAngstrom = 0.602214076;
@@ -103,11 +106,14 @@ struct LinearFit {
 
 LinearFit linear_fit(const std::vector<double> &time,
                      const std::vector<double> &value,
-                     double start_time) {
+                     double start_time,
+                     double end_time =
+                         std::numeric_limits<double>::infinity()) {
     LinearFit result;
     double sum_x = 0.0, sum_y = 0.0;
     for (std::size_t index = 0; index < time.size(); ++index) {
-        if (time[index] < start_time || !std::isfinite(value[index])) continue;
+        if (time[index] < start_time || time[index] > end_time ||
+            !std::isfinite(value[index])) continue;
         ++result.points;
         sum_x += time[index];
         sum_y += value[index];
@@ -117,7 +123,8 @@ LinearFit linear_fit(const std::vector<double> &time,
     const double mean_y = sum_y / result.points;
     double sxx = 0.0, sxy = 0.0, syy = 0.0;
     for (std::size_t index = 0; index < time.size(); ++index) {
-        if (time[index] < start_time || !std::isfinite(value[index])) continue;
+        if (time[index] < start_time || time[index] > end_time ||
+            !std::isfinite(value[index])) continue;
         const double dx = time[index] - mean_x;
         const double dy = value[index] - mean_y;
         sxx += dx * dx;
@@ -129,7 +136,8 @@ LinearFit linear_fit(const std::vector<double> &time,
     result.intercept = mean_y - result.slope * mean_x;
     double residual = 0.0;
     for (std::size_t index = 0; index < time.size(); ++index) {
-        if (time[index] < start_time || !std::isfinite(value[index])) continue;
+        if (time[index] < start_time || time[index] > end_time ||
+            !std::isfinite(value[index])) continue;
         const double difference = value[index] -
             (result.intercept + result.slope * time[index]);
         residual += difference * difference;
@@ -1261,6 +1269,229 @@ void write_layer_dynamics(
     }
 }
 
+struct TimeOriginFrame {
+    long long timestep = 0;
+    Vec3 system_center;
+    std::vector<Vec3> strand_positions;
+    std::vector<int> strand_bins;
+    std::vector<long long> bin_counts;
+};
+
+struct TimeAveragedLag {
+    explicit TimeAveragedLag(int bins = 0)
+        : squared_sum(static_cast<std::size_t>(bins)),
+          observations(static_cast<std::size_t>(bins), 0) {}
+
+    long long time_origins = 0;
+    Vec3 drift_sum;
+    std::vector<Vec3> squared_sum;
+    std::vector<long long> observations;
+};
+
+Vec3 system_center(const DumpFrame &frame, long long atom_count) {
+    Vec3 center;
+    for (long long id = 1; id <= atom_count; ++id)
+        center += frame.unwrapped[static_cast<std::size_t>(id)];
+    return (1.0 / atom_count) * center;
+}
+
+void write_time_averaged_layer_dynamics(
+    const std::filesystem::path &msd_path,
+    const std::filesystem::path &diffusion_path,
+    const Options &options, const ModelInfo &info, const DataFile &data) {
+    DumpReader reader(options.trajectory_file);
+    DumpFrame reference;
+    if (!reader.next(reference, data.declared_atoms))
+        throw std::runtime_error("trajectory contains no frames");
+    const int bins = std::max(1, static_cast<int>(
+        std::ceil(reference.box.lz() / options.bin_width)));
+    const double width = reference.box.lz() / bins;
+
+    std::vector<long long> strand_ids;
+    strand_ids.reserve(static_cast<std::size_t>(data.declared_atoms));
+    for (long long id = 1; id <= data.declared_atoms; ++id) {
+        const Atom &atom = data.atoms[static_cast<std::size_t>(id)];
+        if (component_for_molecule(atom.molecule, info) == kStrand)
+            strand_ids.push_back(id);
+    }
+    if (strand_ids.empty())
+        throw std::runtime_error("trajectory has no component-1 beads");
+
+    std::vector<TimeOriginFrame> origins;
+    origins.reserve(static_cast<std::size_t>(options.time_origin_count));
+    std::map<long long, TimeAveragedLag> lag_accumulators;
+    long long frame_index = 0;
+    long long sampled_frame_index = 0;
+    DumpFrame current = reference;
+    while (true) {
+        if (frame_index % options.frame_stride == 0) {
+            const Vec3 current_center =
+                system_center(current, data.declared_atoms);
+            if (sampled_frame_index % options.time_origin_stride == 0 &&
+                static_cast<long long>(origins.size()) <
+                    options.time_origin_count) {
+                TimeOriginFrame origin;
+                origin.timestep = current.timestep;
+                origin.system_center = current_center;
+                origin.strand_positions.reserve(strand_ids.size());
+                origin.strand_bins.reserve(strand_ids.size());
+                origin.bin_counts.assign(static_cast<std::size_t>(bins), 0);
+                for (const long long id : strand_ids) {
+                    const Vec3 position =
+                        current.unwrapped[static_cast<std::size_t>(id)];
+                    const int bin = bin_index(
+                        position.z, reference.box, bins, info.periodic_z());
+                    origin.strand_positions.push_back(position);
+                    origin.strand_bins.push_back(bin);
+                    ++origin.bin_counts[static_cast<std::size_t>(bin)];
+                }
+                origins.push_back(std::move(origin));
+            }
+
+            for (const TimeOriginFrame &origin : origins) {
+                const long long lag_steps = current.timestep - origin.timestep;
+                if (lag_steps < 0)
+                    throw std::runtime_error(
+                        "trajectory timesteps are not monotonically increasing");
+                auto inserted = lag_accumulators.try_emplace(lag_steps, bins);
+                TimeAveragedLag &lag = inserted.first->second;
+                ++lag.time_origins;
+                const Vec3 drift = current_center - origin.system_center;
+                lag.drift_sum += drift;
+                for (int bin = 0; bin < bins; ++bin)
+                    lag.observations[static_cast<std::size_t>(bin)] +=
+                        origin.bin_counts[static_cast<std::size_t>(bin)];
+                for (std::size_t index = 0; index < strand_ids.size(); ++index) {
+                    const long long id = strand_ids[index];
+                    const int bin = origin.strand_bins[index];
+                    const Vec3 displacement =
+                        current.unwrapped[static_cast<std::size_t>(id)] -
+                        origin.strand_positions[index] - drift;
+                    Vec3 &sum = lag.squared_sum[static_cast<std::size_t>(bin)];
+                    sum.x += displacement.x * displacement.x;
+                    sum.y += displacement.y * displacement.y;
+                    sum.z += displacement.z * displacement.z;
+                }
+            }
+            ++sampled_frame_index;
+        }
+        ++frame_index;
+        if (!reader.next(current, data.declared_atoms)) break;
+    }
+    if (origins.size() < 2)
+        throw std::runtime_error(
+            "time-averaged layer MSD needs at least two selected time origins; "
+            "reduce --time-origin-stride or increase --time-origin-count");
+
+    std::ofstream out(msd_path);
+    if (!out) throw std::runtime_error("cannot write " + msd_path.string());
+    out << "lag_index\tlag_steps\ttime_ns\tbin\tzlo_origin_A\tzhi_origin_A"
+        << "\ttime_origins\tstrand_bead_observations"
+        << "\tmean_strand_beads_per_origin"
+        << "\tmsd_x_A2\tmsd_y_A2\tmsd_z_A2"
+        << "\tmsd_parallel_A2\tmsd_total_A2"
+        << "\tmean_drift_x_A\tmean_drift_y_A\tmean_drift_z_A\n";
+
+    std::vector<double> sampled_times;
+    std::vector<long long> time_origins_by_lag;
+    std::vector<std::vector<double>> parallel_msd(
+        static_cast<std::size_t>(bins));
+    std::vector<std::vector<double>> total_msd(
+        static_cast<std::size_t>(bins));
+    long long lag_index = 0;
+    for (const auto &entry : lag_accumulators) {
+        const long long lag_steps = entry.first;
+        const TimeAveragedLag &lag = entry.second;
+        const double time_ns =
+            lag_steps * info.timestep_fs * 1.0e-6;
+        sampled_times.push_back(time_ns);
+        time_origins_by_lag.push_back(lag.time_origins);
+        const Vec3 mean_drift =
+            (1.0 / lag.time_origins) * lag.drift_sum;
+        for (int bin = 0; bin < bins; ++bin) {
+            const long long observations =
+                lag.observations[static_cast<std::size_t>(bin)];
+            const Vec3 msd = observations > 0
+                ? (1.0 / observations) *
+                    lag.squared_sum[static_cast<std::size_t>(bin)]
+                : Vec3{std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::quiet_NaN()};
+            const double parallel = msd.x + msd.y;
+            const double total = parallel + msd.z;
+            parallel_msd[static_cast<std::size_t>(bin)].push_back(parallel);
+            total_msd[static_cast<std::size_t>(bin)].push_back(total);
+            const double zlo = reference.box.zlo + bin * width;
+            out << lag_index << '\t' << lag_steps << '\t'
+                << std::setprecision(12) << time_ns << '\t' << bin + 1 << '\t'
+                << zlo << '\t' << zlo + width << '\t' << lag.time_origins
+                << '\t' << observations << '\t'
+                << static_cast<double>(observations) / lag.time_origins << '\t'
+                << msd.x << '\t' << msd.y << '\t' << msd.z << '\t'
+                << parallel << '\t' << total << '\t'
+                << mean_drift.x << '\t' << mean_drift.y << '\t'
+                << mean_drift.z << '\n';
+        }
+        ++lag_index;
+    }
+
+    std::ofstream diffusion(diffusion_path);
+    if (!diffusion)
+        throw std::runtime_error("cannot write " + diffusion_path.string());
+    diffusion
+        << "bin\tzlo_origin_A\tzhi_origin_A\tmean_strand_beads_per_origin"
+        << "\tselected_time_origins\tminimum_time_origins_in_fit"
+        << "\tfit_start_ns\tfit_end_ns"
+        << "\tfit_points_xy\tslope_xy_A2_per_ns\tintercept_xy_A2\tR2_xy"
+        << "\tD_xy_A2_per_ns\tD_xy_cm2_per_s"
+        << "\tfit_points_3D\tslope_3D_A2_per_ns\tintercept_3D_A2\tR2_3D"
+        << "\tD_3D_A2_per_ns\tD_3D_cm2_per_s"
+        << "\trecommended_dimension\trecommended_D_A2_per_ns"
+        << "\trecommended_D_cm2_per_s\trecommended_R2\n";
+    const long long minimum_fit_origins =
+        (static_cast<long long>(origins.size()) + 1) / 2;
+    double end_time = 0.0;
+    for (std::size_t index = 0; index < sampled_times.size(); ++index)
+        if (time_origins_by_lag[index] >= minimum_fit_origins)
+            end_time = sampled_times[index];
+    const double start_time = options.diffusion_fit_start_fraction * end_time;
+    constexpr double kAngstrom2PerNsToCm2PerS = 1.0e-7;
+    const TimeAveragedLag &zero_lag = lag_accumulators.at(0);
+    for (int bin = 0; bin < bins; ++bin) {
+        const LinearFit xy = linear_fit(
+            sampled_times, parallel_msd[static_cast<std::size_t>(bin)],
+            start_time, end_time);
+        const LinearFit three_d = linear_fit(
+            sampled_times, total_msd[static_cast<std::size_t>(bin)],
+            start_time, end_time);
+        const double d_xy = xy.slope / 4.0;
+        const double d_3d = three_d.slope / 6.0;
+        const bool recommend_xy = info.geometry == "film";
+        const double recommended_d = recommend_xy ? d_xy : d_3d;
+        const double recommended_r2 =
+            recommend_xy ? xy.r_squared : three_d.r_squared;
+        const double zlo = reference.box.zlo + bin * width;
+        const double mean_beads =
+            static_cast<double>(
+                zero_lag.observations[static_cast<std::size_t>(bin)]) /
+            zero_lag.time_origins;
+        diffusion << bin + 1 << '\t' << std::setprecision(12)
+            << zlo << '\t' << zlo + width << '\t' << mean_beads << '\t'
+            << origins.size() << '\t' << minimum_fit_origins << '\t'
+            << start_time << '\t' << end_time << '\t'
+            << xy.points << '\t' << xy.slope << '\t' << xy.intercept << '\t'
+            << xy.r_squared << '\t' << d_xy << '\t'
+            << d_xy * kAngstrom2PerNsToCm2PerS << '\t'
+            << three_d.points << '\t' << three_d.slope << '\t'
+            << three_d.intercept << '\t' << three_d.r_squared << '\t'
+            << d_3d << '\t' << d_3d * kAngstrom2PerNsToCm2PerS << '\t'
+            << (recommend_xy ? "2D_xy" : "3D") << '\t'
+            << recommended_d << '\t'
+            << recommended_d * kAngstrom2PerNsToCm2PerS << '\t'
+            << recommended_r2 << '\n';
+    }
+}
+
 void write_report(
     const std::filesystem::path &path, const Options &options,
     const ModelInfo &info, const DataFile &data, int bins,
@@ -1333,6 +1564,18 @@ void write_report(
             << "D_xy definition: slope(MSD_x+MSD_y)/4\n"
             << "D_3D definition: slope(MSD_total)/6\n"
             << "diffusion slopes remain signed; negative values flag unresolved diffusion or noise\n";
+        if (options.time_averaged_msd) {
+            out << "time-averaged layer MSD: enabled\n"
+                << "time-origin layer assignment: component-1 beads are reassigned by z at each selected origin\n"
+                << "time-origin selection: at most "
+                << options.time_origin_count << " origins, every "
+                << options.time_origin_stride << " sampled frames\n"
+                << "time-averaged lag grouping: exact timestep difference\n"
+                << "time-averaged drift correction: whole-system COM displacement for each origin pair\n"
+                << "time-averaged diffusion fit end: largest lag sampled by at least half of selected origins\n";
+        } else {
+            out << "time-averaged layer MSD: not requested\n";
+        }
     }
     if (info.geometry == "film")
         out << "film guidance: compare x/y or parallel MSD; interpret z using the"
@@ -1351,6 +1594,11 @@ void print_help(const char *program) {
         << "  --wall-fraction X    material fraction at each wall for summary (default 0.20)\n"
         << "  --core-fraction X    centered material fraction for summary (default 0.20)\n"
         << "  --frame-stride N     analyze every Nth trajectory frame (default 1)\n"
+        << "  --time-averaged-msd  also calculate layer MSD over sampled time origins\n"
+        << "  --time-origin-stride N\n"
+        << "                      spacing between time origins in sampled frames (default 100)\n"
+        << "  --time-origin-count N\n"
+        << "                      maximum selected time origins (default 10)\n"
         << "  --diffusion-fit-start-fraction X\n"
         << "                      fit D over final 1-X fraction (default 0.50)\n"
         << "  --dw-time-ps X       use the nearest DW frame to X ps\n"
@@ -1387,6 +1635,12 @@ Options parse_options(int argc, char **argv) {
         else if (option == "--core-fraction")
             options.core_fraction = std::stod(value());
         else if (option == "--frame-stride") options.frame_stride = std::stoll(value());
+        else if (option == "--time-averaged-msd")
+            options.time_averaged_msd = true;
+        else if (option == "--time-origin-stride")
+            options.time_origin_stride = std::stoll(value());
+        else if (option == "--time-origin-count")
+            options.time_origin_count = std::stoll(value());
         else if (option == "--diffusion-fit-start-fraction")
             options.diffusion_fit_start_fraction = std::stod(value());
         else if (option == "--dw-time-ps")
@@ -1407,6 +1661,12 @@ Options parse_options(int argc, char **argv) {
     if (options.disable_z1 && !options.z1_sp_file.empty())
         throw std::runtime_error("--no-z1 cannot be combined with --z1-sp");
     if (options.frame_stride < 1) throw std::runtime_error("frame stride must be positive");
+    if (options.time_origin_stride < 1)
+        throw std::runtime_error("time-origin stride must be positive");
+    if (options.time_origin_count < 2)
+        throw std::runtime_error("time-origin count must be at least 2");
+    if (options.time_averaged_msd && options.trajectory_file.empty())
+        throw std::runtime_error("--time-averaged-msd requires --trajectory");
     if (!(options.diffusion_fit_start_fraction >= 0.0 &&
           options.diffusion_fit_start_fraction < 1.0))
         throw std::runtime_error(
@@ -1466,6 +1726,13 @@ int main(int argc, char **argv) {
             write_layer_dynamics(
                 directory / ("layer_dynamics." + name + ".tsv"),
                 directory / ("layer_diffusion." + name + ".tsv"),
+                options, info, data);
+        if (options.time_averaged_msd)
+            write_time_averaged_layer_dynamics(
+                directory /
+                    ("layer_dynamics_time_averaged." + name + ".tsv"),
+                directory /
+                    ("layer_diffusion_time_averaged." + name + ".tsv"),
                 options, info, data);
         write_report(directory / ("profile_report." + name + ".txt"),
                      options, info, data, bins, z1_sp_file);
