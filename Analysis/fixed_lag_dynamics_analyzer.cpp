@@ -14,9 +14,46 @@ struct Options {
     double msd_lag_ns = 10.0;
     double debye_waller_lag_ps = 10.0;
     double bin_width = 5.0;
+    double profile_window_width = 5.0;
+    double profile_step = 1.0;
     long long origin_stride = 1;
     bool recenter_film = true;
 };
+
+struct SlidingGrid {
+    int fine_bins = 1;
+    double step_A = 1.0;
+    int window_bins = 1;
+    int half_window_bins = 0;
+    double window_width_A = 1.0;
+};
+
+SlidingGrid make_sliding_grid(const Box &box, const Options &options) {
+    SlidingGrid grid;
+    grid.fine_bins = std::max(1, static_cast<int>(
+        std::ceil(box.lz() / options.profile_step)));
+    grid.step_A = box.lz() / grid.fine_bins;
+    const double target_window_bins =
+        options.profile_window_width / grid.step_A;
+    const int maximum_odd_bins =
+        grid.fine_bins % 2 == 0 ? grid.fine_bins - 1 : grid.fine_bins;
+    grid.window_bins = std::clamp(
+        static_cast<int>(std::llround(target_window_bins)), 1,
+        maximum_odd_bins);
+    if (grid.window_bins % 2 == 0) {
+        const int lower = grid.window_bins - 1;
+        const int upper = grid.window_bins + 1;
+        if (upper <= maximum_odd_bins &&
+            std::abs(upper - target_window_bins) <
+                std::abs(lower - target_window_bins))
+            grid.window_bins = upper;
+        else
+            grid.window_bins = lower;
+    }
+    grid.half_window_bins = grid.window_bins / 2;
+    grid.window_width_A = grid.window_bins * grid.step_A;
+    return grid;
+}
 
 struct DumpFrame {
     long long timestep = 0;
@@ -232,6 +269,72 @@ struct LayerStats {
     ComponentSums pooled_einstein;
 };
 
+struct LayerSample {
+    std::array<long long, kComponentCount> component_counts{};
+    Vec3 squared_sum;
+};
+
+LayerSample sliding_sample(
+    const std::vector<std::array<long long, kComponentCount>> &fine_counts,
+    const std::vector<Vec3> &fine_squared_sum, int center,
+    const SlidingGrid &grid, bool periodic_z) {
+    LayerSample sample;
+    for (int offset = -grid.half_window_bins;
+         offset <= grid.half_window_bins; ++offset) {
+        int index = center + offset;
+        if (periodic_z) {
+            index %= grid.fine_bins;
+            if (index < 0) index += grid.fine_bins;
+        } else if (index < 0 || index >= grid.fine_bins) {
+            continue;
+        }
+        const auto &counts = fine_counts[static_cast<std::size_t>(index)];
+        for (int component = 0; component < kComponentCount; ++component)
+            sample.component_counts[static_cast<std::size_t>(component)] +=
+                counts[static_cast<std::size_t>(component)];
+        sample.squared_sum += fine_squared_sum[static_cast<std::size_t>(index)];
+    }
+    return sample;
+}
+
+void add_layer_sample(
+    LayerStats &stats,
+    const std::array<long long, kComponentCount> &component_counts,
+    const Vec3 &squared_sum, double layer_volume_A3, double actual_lag_ps,
+    bool report_einstein) {
+    const long long count =
+        component_counts[static_cast<std::size_t>(kStrand)];
+    const Vec3 value = count > 0
+        ? (1.0 / count) * squared_sum
+        : Vec3{std::numeric_limits<double>::quiet_NaN(),
+               std::numeric_limits<double>::quiet_NaN(),
+               std::numeric_limits<double>::quiet_NaN()};
+    const Vec3 d{value.x / (2.0 * actual_lag_ps),
+                 value.y / (2.0 * actual_lag_ps),
+                 value.z / (2.0 * actual_lag_ps)};
+    stats.beads.add(static_cast<double>(count));
+    stats.volume_exposure_A3 += layer_volume_A3;
+    for (int component = 0; component < kComponentCount; ++component)
+        stats.component_observations[static_cast<std::size_t>(component)] +=
+            component_counts[static_cast<std::size_t>(component)];
+    stats.displacement.add(value);
+    if (report_einstein && count > 0) {
+        stats.einstein.x.add(d.x);
+        stats.einstein.y.add(d.y);
+        stats.einstein.z.add(d.z);
+        stats.einstein.xy.add(
+            (value.x + value.y) / (4.0 * actual_lag_ps));
+        stats.einstein.total.add(
+            (value.x + value.y + value.z) / (6.0 * actual_lag_ps));
+    }
+    if (count > 0) {
+        ++stats.occupied_origins;
+        stats.pooled_displacement.add_displacement(squared_sum);
+        if (report_einstein)
+            stats.pooled_einstein.add_einstein(squared_sum, actual_lag_ps);
+    }
+}
+
 struct FixedLagResult {
     std::string observable;
     double target_lag_ps = 0.0;
@@ -273,6 +376,8 @@ FixedLagResult analyze_fixed_lag(
     const std::filesystem::path &layer_origin_path,
     const std::filesystem::path &layer_summary_path,
     const std::filesystem::path &layer_pooled_summary_path,
+    const std::filesystem::path &sliding_origin_path,
+    const std::filesystem::path &sliding_pooled_summary_path,
     const Options &options, const ModelInfo &info, const DataFile &data,
     const std::string &observable) {
     const long long target_lag_steps = static_cast<long long>(
@@ -299,6 +404,7 @@ FixedLagResult analyze_fixed_lag(
     const int bins = std::max(1, static_cast<int>(
         std::ceil(reference_box.lz() / options.bin_width)));
     const double width = reference_box.lz() / bins;
+    const SlidingGrid sliding_grid = make_sliding_grid(reference_box, options);
     const double reference_midplane =
         0.5 * (reference_box.zlo + reference_box.zhi);
 
@@ -308,6 +414,9 @@ FixedLagResult analyze_fixed_lag(
     std::ofstream layers_out(layer_origin_path);
     if (!layers_out)
         throw std::runtime_error("cannot write " + layer_origin_path.string());
+    std::ofstream sliding_out(sliding_origin_path);
+    if (!sliding_out)
+        throw std::runtime_error("cannot write " + sliding_origin_path.string());
 
     const std::string value_prefix = report_einstein ? "msd" : "u2";
     origins_out << "origin_index\torigin_frame\torigin_timestep\torigin_time_ps"
@@ -335,13 +444,29 @@ FixedLagResult analyze_fixed_lag(
         << "\tstrand_bead_density_A-3\tcrosslinker_bead_density_A-3"
         << "\tmoderator_bead_density_A-3\tfiller_bead_density_A-3";
     layers_out << '\n';
+    sliding_out << "origin_index\torigin_timestep\torigin_time_ps"
+        << "\tactual_lag_ps\twindow\tcenter_aligned_A\tzlo_aligned_A"
+        << "\tzhi_aligned_A\twindow_width_A\tstrand_beads"
+        << "\tfilm_recenter_shift_A\t" << value_prefix << "_x_A2\t"
+        << value_prefix << "_y_A2\t" << value_prefix << "_z_A2\t"
+        << value_prefix << "_xy_A2\t" << value_prefix << "_3D_A2";
+    if (report_einstein)
+        sliding_out << "\tD_E_x_A2_per_ps\tD_E_y_A2_per_ps"
+            << "\tD_E_z_A2_per_ps\tD_E_xy_A2_per_ps\tD_E_3D_A2_per_ps";
+    sliding_out << "\tall_beads\tcrosslinker_beads\tmoderator_beads"
+        << "\tfiller_beads\twindow_volume_A3\tall_bead_density_A-3"
+        << "\tstrand_bead_density_A-3\tcrosslinker_bead_density_A-3"
+        << "\tmoderator_bead_density_A-3\tfiller_bead_density_A-3\n";
     origins_out << std::setprecision(12);
     layers_out << std::setprecision(12);
+    sliding_out << std::setprecision(12);
 
     FixedLagResult result;
     result.observable = observable;
     result.target_lag_ps = target_lag_ps;
     result.layers.resize(static_cast<std::size_t>(bins));
+    std::vector<LayerStats> sliding_layers(
+        static_cast<std::size_t>(sliding_grid.fine_bins));
     DumpFrame target_before;
     bool have_before = false;
     DumpFrame origin;
@@ -385,6 +510,10 @@ FixedLagResult analyze_fixed_lag(
         std::vector<long long> bin_counts(static_cast<std::size_t>(bins), 0);
         std::vector<std::array<long long, kComponentCount>> component_counts(
             static_cast<std::size_t>(bins));
+        std::vector<std::array<long long, kComponentCount>> fine_counts(
+            static_cast<std::size_t>(sliding_grid.fine_bins));
+        std::vector<Vec3> fine_squared_sum(
+            static_cast<std::size_t>(sliding_grid.fine_bins));
         for (long long id = 1; id <= data.declared_atoms; ++id) {
             const Vec3 position =
                 origin.unwrapped[static_cast<std::size_t>(id)];
@@ -394,6 +523,11 @@ FixedLagResult analyze_fixed_lag(
             const int component = component_for_molecule(
                 data.atoms[static_cast<std::size_t>(id)].molecule, info);
             ++component_counts[static_cast<std::size_t>(bin)]
+                [static_cast<std::size_t>(component)];
+            const int fine_bin = bin_index(
+                position.z + recenter_shift, reference_box,
+                sliding_grid.fine_bins, info.periodic_z());
+            ++fine_counts[static_cast<std::size_t>(fine_bin)]
                 [static_cast<std::size_t>(component)];
         }
         Vec3 global_sum;
@@ -411,6 +545,10 @@ FixedLagResult analyze_fixed_lag(
                                displacement.z * displacement.z};
             squared_sum[static_cast<std::size_t>(bin)] += squared;
             ++bin_counts[static_cast<std::size_t>(bin)];
+            const int fine_bin = bin_index(
+                origin_position.z + recenter_shift, reference_box,
+                sliding_grid.fine_bins, info.periodic_z());
+            fine_squared_sum[static_cast<std::size_t>(fine_bin)] += squared;
             global_sum += squared;
         }
         const Vec3 global_msd =
@@ -491,34 +629,74 @@ FixedLagResult analyze_fixed_lag(
             layers_out << '\n';
 
             LayerStats &stats = result.layers[static_cast<std::size_t>(bin)];
-            stats.beads.add(static_cast<double>(count));
-            stats.volume_exposure_A3 += layer_volume_A3;
-            for (int component = 0; component < kComponentCount; ++component) {
-                const long long component_count =
-                    counts[static_cast<std::size_t>(component)];
-                stats.component_observations[static_cast<std::size_t>(component)] +=
-                    component_count;
-            }
-            stats.displacement.add(value);
-            if (report_einstein && count > 0) {
-                stats.einstein.x.add(d.x);
-                stats.einstein.y.add(d.y);
-                stats.einstein.z.add(d.z);
-                stats.einstein.xy.add(
-                    (value.x + value.y) / (4.0 * actual_lag_ps));
-                stats.einstein.total.add(
-                    (value.x + value.y + value.z) /
-                    (6.0 * actual_lag_ps));
-            }
-            if (count > 0) {
-                ++stats.occupied_origins;
-                stats.pooled_displacement.add_displacement(
-                    squared_sum[static_cast<std::size_t>(bin)]);
-                if (report_einstein)
-                    stats.pooled_einstein.add_einstein(
-                        squared_sum[static_cast<std::size_t>(bin)],
-                        actual_lag_ps);
-            }
+            add_layer_sample(
+                stats, counts, squared_sum[static_cast<std::size_t>(bin)],
+                layer_volume_A3, actual_lag_ps, report_einstein);
+        }
+
+        const int first_window = info.periodic_z()
+            ? 0 : sliding_grid.half_window_bins;
+        const int final_window = info.periodic_z()
+            ? sliding_grid.fine_bins
+            : sliding_grid.fine_bins - sliding_grid.half_window_bins;
+        for (int center_index = first_window;
+             center_index < final_window; ++center_index) {
+            const LayerSample sample = sliding_sample(
+                fine_counts, fine_squared_sum, center_index, sliding_grid,
+                info.periodic_z());
+            const long long count = sample.component_counts[
+                static_cast<std::size_t>(kStrand)];
+            const long long all_count = std::accumulate(
+                sample.component_counts.begin(),
+                sample.component_counts.end(), 0LL);
+            const Vec3 value = count > 0
+                ? (1.0 / count) * sample.squared_sum
+                : Vec3{std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::quiet_NaN()};
+            const Vec3 d = einstein_components(value, actual_lag_ps);
+            const double center = reference_box.zlo +
+                (center_index + 0.5) * sliding_grid.step_A;
+            const double zlo = center - 0.5 * sliding_grid.window_width_A;
+            const double zhi = center + 0.5 * sliding_grid.window_width_A;
+            const double window_volume_A3 =
+                origin.box.lx() * origin.box.ly() *
+                sliding_grid.window_width_A;
+            sliding_out << result.origins << '\t' << origin.timestep << '\t'
+                << origin_time_ps << '\t' << actual_lag_ps << '\t'
+                << center_index + 1 << '\t' << center << '\t' << zlo << '\t'
+                << zhi << '\t' << sliding_grid.window_width_A << '\t'
+                << count << '\t' << recenter_shift << '\t' << value.x << '\t'
+                << value.y << '\t' << value.z << '\t' << value.x + value.y
+                << '\t' << value.x + value.y + value.z;
+            if (report_einstein)
+                sliding_out << '\t' << d.x << '\t' << d.y << '\t' << d.z
+                    << '\t' << (value.x + value.y) / (4.0 * actual_lag_ps)
+                    << '\t' << (value.x + value.y + value.z) /
+                        (6.0 * actual_lag_ps);
+            sliding_out << '\t' << all_count << '\t'
+                << sample.component_counts[
+                       static_cast<std::size_t>(kCrosslinker)] << '\t'
+                << sample.component_counts[
+                       static_cast<std::size_t>(kModerator)] << '\t'
+                << sample.component_counts[
+                       static_cast<std::size_t>(kFiller)] << '\t'
+                << window_volume_A3 << '\t'
+                << all_count / window_volume_A3 << '\t'
+                << count / window_volume_A3 << '\t'
+                << sample.component_counts[
+                       static_cast<std::size_t>(kCrosslinker)] /
+                    window_volume_A3 << '\t'
+                << sample.component_counts[
+                       static_cast<std::size_t>(kModerator)] /
+                    window_volume_A3 << '\t'
+                << sample.component_counts[
+                       static_cast<std::size_t>(kFiller)] /
+                    window_volume_A3 << '\n';
+            add_layer_sample(
+                sliding_layers[static_cast<std::size_t>(center_index)],
+                sample.component_counts, sample.squared_sum,
+                window_volume_A3, actual_lag_ps, report_einstein);
         }
         ++result.origins;
     }
@@ -631,6 +809,96 @@ FixedLagResult analyze_fixed_lag(
         }
         pooled << '\n';
     }
+
+    std::ofstream sliding_pooled(sliding_pooled_summary_path);
+    if (!sliding_pooled)
+        throw std::runtime_error(
+            "cannot write " + sliding_pooled_summary_path.string());
+    sliding_pooled << "window\tcenter_aligned_A\tzlo_aligned_A"
+        << "\tzhi_aligned_A\tstep_A\twindow_width_A\torigins_total"
+        << "\torigins_occupied\torigin_coverage\tmean_window_volume_A3"
+        << "\tall_bead_observations\tstrand_bead_observations"
+        << "\tcrosslinker_bead_observations\tmoderator_bead_observations"
+        << "\tfiller_bead_observations\tmean_all_beads\tmean_strand_beads"
+        << "\tmean_crosslinker_beads\tmean_moderator_beads"
+        << "\tmean_filler_beads\tall_bead_density_A-3"
+        << "\tstrand_bead_density_A-3\tcrosslinker_bead_density_A-3"
+        << "\tmoderator_bead_density_A-3\tfiller_bead_density_A-3"
+        << "\tpooled_mean_x_A2\tpooled_mean_y_A2\tpooled_mean_z_A2"
+        << "\tpooled_mean_xy_A2\tpooled_mean_3D_A2";
+    if (report_einstein)
+        sliding_pooled
+            << "\tpooled_D_E_x_A2_per_ps\tpooled_D_E_y_A2_per_ps"
+            << "\tpooled_D_E_z_A2_per_ps\tpooled_D_E_xy_A2_per_ps"
+            << "\tpooled_D_E_3D_A2_per_ps";
+    sliding_pooled << '\n' << std::setprecision(12);
+    const int first_window = info.periodic_z()
+        ? 0 : sliding_grid.half_window_bins;
+    const int final_window = info.periodic_z()
+        ? sliding_grid.fine_bins
+        : sliding_grid.fine_bins - sliding_grid.half_window_bins;
+    for (int center_index = first_window;
+         center_index < final_window; ++center_index) {
+        const LayerStats &stats =
+            sliding_layers[static_cast<std::size_t>(center_index)];
+        const double center = reference_box.zlo +
+            (center_index + 0.5) * sliding_grid.step_A;
+        const double zlo = center - 0.5 * sliding_grid.window_width_A;
+        const double zhi = center + 0.5 * sliding_grid.window_width_A;
+        const long long strand_observations =
+            stats.component_observations[static_cast<std::size_t>(kStrand)];
+        const long long all_observations = std::accumulate(
+            stats.component_observations.begin(),
+            stats.component_observations.end(), 0LL);
+        const double inverse_origins = result.origins > 0
+            ? 1.0 / static_cast<double>(result.origins)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double inverse_volume = stats.volume_exposure_A3 > 0.0
+            ? 1.0 / stats.volume_exposure_A3
+            : std::numeric_limits<double>::quiet_NaN();
+        sliding_pooled << center_index + 1 << '\t' << center << '\t'
+            << zlo << '\t' << zhi << '\t' << sliding_grid.step_A << '\t'
+            << sliding_grid.window_width_A << '\t' << result.origins << '\t'
+            << stats.occupied_origins << '\t'
+            << stats.occupied_origins * inverse_origins << '\t'
+            << stats.volume_exposure_A3 * inverse_origins << '\t'
+            << all_observations << '\t' << strand_observations << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kCrosslinker)] << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kModerator)] << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kFiller)] << '\t'
+            << all_observations * inverse_origins << '\t'
+            << strand_observations * inverse_origins << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kCrosslinker)] * inverse_origins
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kModerator)] * inverse_origins
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kFiller)] * inverse_origins
+            << '\t' << all_observations * inverse_volume << '\t'
+            << strand_observations * inverse_volume << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kCrosslinker)] * inverse_volume
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kModerator)] * inverse_volume
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kFiller)] * inverse_volume
+            << '\t';
+        write_component_pooled(
+            sliding_pooled, stats.pooled_displacement, strand_observations);
+        if (report_einstein) {
+            sliding_pooled << '\t';
+            write_component_pooled(
+                sliding_pooled, stats.pooled_einstein, strand_observations);
+        }
+        sliding_pooled << '\n';
+    }
     return result;
 }
 
@@ -698,6 +966,11 @@ void write_report(
         << " receive equal weight with dense origins\n"
         << "layer density: all components counted at the same post-release"
         << " time origins used by each fixed-lag observable\n"
+        << "sliding profile requested window / step: "
+        << options.profile_window_width << " / " << options.profile_step
+        << " A; the realized values are reported in each output row\n"
+        << "sliding-window caution: neighboring centers overlap and must not"
+        << " be treated as independent spatial samples\n"
         << "film recentering: "
         << (info.geometry == "film" && options.recenter_film ?
             "origin strand midplane aligned to the reference box midplane" :
@@ -722,6 +995,8 @@ void print_help(const char *program) {
         << "  --dw-lag-ps X         fixed u^2 lag (default 10)\n"
         << "  --origin-stride N     use every Nth possible origin (default 1)\n"
         << "  --bin-width X         target aligned z-bin width in A (default 5)\n"
+        << "  --profile-window X    sliding averaging width in A (default 5)\n"
+        << "  --profile-step X      sliding center spacing in A (default 1)\n"
         << "  --no-film-recenter    keep absolute dump z for film origin layers\n"
         << "  --output-dir PATH     output directory (default analysis_<case>)\n"
         << "  --help                show this help\n";
@@ -755,6 +1030,10 @@ Options parse_options(int argc, char **argv) {
             options.origin_stride = std::stoll(value());
         else if (option == "--bin-width")
             options.bin_width = std::stod(value());
+        else if (option == "--profile-window")
+            options.profile_window_width = std::stod(value());
+        else if (option == "--profile-step")
+            options.profile_step = std::stod(value());
         else if (option == "--no-film-recenter")
             options.recenter_film = false;
         else if (option == "--output-dir")
@@ -778,6 +1057,10 @@ Options parse_options(int argc, char **argv) {
         throw std::runtime_error("origin stride must be positive");
     if (!(options.bin_width > 0.0))
         throw std::runtime_error("bin width must be positive");
+    if (!(options.profile_window_width > 0.0))
+        throw std::runtime_error("profile window must be positive");
+    if (!(options.profile_step > 0.0))
+        throw std::runtime_error("profile step must be positive");
     return options;
 }
 
@@ -800,6 +1083,10 @@ int main(int argc, char **argv) {
             directory / ("fixed_lag_msd_layer_summary." + name + ".tsv"),
             directory /
                 ("fixed_lag_msd_layer_pooled_summary." + name + ".tsv"),
+            directory /
+                ("fixed_lag_msd_sliding_layers." + name + ".tsv"),
+            directory / ("fixed_lag_msd_sliding_layer_pooled_summary." +
+                         name + ".tsv"),
             options, info, data, "msd_fixed_lag");
         const FixedLagResult dw = analyze_fixed_lag(
             options.debye_waller_trajectory_file,
@@ -809,6 +1096,10 @@ int main(int argc, char **argv) {
             directory / ("fixed_lag_u2_layer_summary." + name + ".tsv"),
             directory /
                 ("fixed_lag_u2_layer_pooled_summary." + name + ".tsv"),
+            directory /
+                ("fixed_lag_u2_sliding_layers." + name + ".tsv"),
+            directory / ("fixed_lag_u2_sliding_layer_pooled_summary." +
+                         name + ".tsv"),
             options, info, data, "u2_fixed_lag");
         write_global_summary(
             directory / ("fixed_lag_summary." + name + ".tsv"), msd, dw);

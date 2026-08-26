@@ -96,10 +96,14 @@ for output in \
     fixed_lag_msd_layers.fixed_lag.tsv \
     fixed_lag_msd_layer_summary.fixed_lag.tsv \
     fixed_lag_msd_layer_pooled_summary.fixed_lag.tsv \
+    fixed_lag_msd_sliding_layers.fixed_lag.tsv \
+    fixed_lag_msd_sliding_layer_pooled_summary.fixed_lag.tsv \
     fixed_lag_u2_origins.fixed_lag.tsv \
     fixed_lag_u2_layers.fixed_lag.tsv \
     fixed_lag_u2_layer_summary.fixed_lag.tsv \
     fixed_lag_u2_layer_pooled_summary.fixed_lag.tsv \
+    fixed_lag_u2_sliding_layers.fixed_lag.tsv \
+    fixed_lag_u2_sliding_layer_pooled_summary.fixed_lag.tsv \
     fixed_lag_summary.fixed_lag.tsv \
     fixed_lag_report.fixed_lag.txt
 do
@@ -183,5 +187,58 @@ awk -F '\t' -v declared_atoms="$declared_atoms" '
     { total += $all_beads }
     END { if ((total - declared_atoms)^2 > 1e-12) exit 1 }
 ' "$pooled_layers"
+
+sliding_raw="$fixed_output/fixed_lag_msd_sliding_layers.fixed_lag.tsv"
+sliding_pooled="$fixed_output/fixed_lag_msd_sliding_layer_pooled_summary.fixed_lag.tsv"
+awk -F '\t' '
+    FNR == NR {
+        if (FNR == 1) {
+            for (i = 1; i <= NF; ++i) {
+                if ($i == "window") raw_window = i
+                if ($i == "strand_beads") raw_beads = i
+                if ($i == "msd_xy_A2") raw_value = i
+            }
+            next
+        }
+        weighted[$raw_window] += $raw_beads * $raw_value
+        observations[$raw_window] += $raw_beads
+        next
+    }
+    FNR == 1 {
+        for (i = 1; i <= NF; ++i) {
+            if ($i == "window") pooled_window = i
+            if ($i == "strand_bead_observations") pooled_beads = i
+            if ($i == "pooled_mean_xy_A2") pooled_value = i
+            if ($i == "pooled_D_E_xy_A2_per_ps") pooled_diffusion = i
+        }
+        next
+    }
+    $pooled_beads > 0 {
+        expected = weighted[$pooled_window] / observations[$pooled_window]
+        if (($pooled_value - expected)^2 > 1e-20) exit 1
+        if (($pooled_diffusion - expected / 40000.0)^2 > 1e-24) exit 1
+        checked = 1
+    }
+    END { exit !checked }
+' "$sliding_raw" "$sliding_pooled"
+
+awk -F '\t' '
+    NR == 1 {
+        for (i = 1; i <= NF; ++i) {
+            if ($i == "center_aligned_A") center = i
+            if ($i == "step_A") step = i
+            if ($i == "window_width_A") width = i
+        }
+        next
+    }
+    {
+        if ($step < 0.9 || $step > 1.01) exit 1
+        if ($width < 4.5 || $width > 5.5) exit 1
+        if (rows > 0 && (($center - previous) - $step)^2 > 1e-16) exit 1
+        previous = $center
+        rows++
+    }
+    END { if (rows < 40) exit 1 }
+' "$sliding_pooled"
 
 echo "Fixed-lag dynamics analyzer tests passed"

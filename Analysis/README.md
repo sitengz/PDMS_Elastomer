@@ -340,6 +340,17 @@ lag is evaluated, runtime is linear in trajectory length rather than quadratic.
 Use `--origin-stride N` to thin origins, `--msd-lag-ns X` or `--dw-lag-ps X`
 to override the standard lags, and `--bin-width X` to control z resolution.
 
+For higher-resolution surface-boundary detection, the analyzer also calculates
+a sliding profile by default. Its 5 A averaging window is evaluated at centers
+spaced approximately 1 A apart. Change these independently with
+`--profile-window X` and `--profile-step X`. The box is first divided into fine
+cells at the requested step, then the nearest odd number of cells is combined
+at every window center; the realized step and window width are written to every
+summary row. Neighboring windows overlap and are therefore strongly correlated.
+They are intended for continuous boundary localization, not as independent
+spatial samples. Resample complete time-origin blocks when calculating a
+boundary confidence interval.
+
 For films, origin-layer z coordinates are aligned to the instantaneous
 component-1 midplane by default so slow translation of the free-standing film
 does not smear the profile. Use `--no-film-recenter` for absolute dump-box z.
@@ -377,6 +388,13 @@ Outputs in `analysis_<case>/` are:
   `fixed_lag_u2_layer_pooled_summary.<case>.tsv`: bead-origin pooled dynamics,
   post-release component density, occupied-origin coverage, and observation
   counts for robust surface-profile filtering or adaptive binning;
+- `fixed_lag_msd_sliding_layers.<case>.tsv` and
+  `fixed_lag_u2_sliding_layers.<case>.tsv`: per-origin overlapping windows for
+  block-bootstrap boundary uncertainty;
+- `fixed_lag_msd_sliding_layer_pooled_summary.<case>.tsv` and
+  `fixed_lag_u2_sliding_layer_pooled_summary.<case>.tsv`: 5 A-window / 1 A-step
+  bead-pooled profiles with realized geometry, component densities, coverage,
+  and observation counts;
 - `fixed_lag_summary.<case>.tsv` and `fixed_lag_report.<case>.txt`.
 
 Origin SD values describe within-trajectory variation. Neighboring origins are
