@@ -197,10 +197,39 @@ struct ComponentStats {
     }
 };
 
+struct ComponentSums {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double xy = 0.0;
+    double total = 0.0;
+
+    void add_displacement(const Vec3 &sum) {
+        x += sum.x;
+        y += sum.y;
+        z += sum.z;
+        xy += sum.x + sum.y;
+        total += sum.x + sum.y + sum.z;
+    }
+
+    void add_einstein(const Vec3 &sum, double lag_ps) {
+        x += sum.x / (2.0 * lag_ps);
+        y += sum.y / (2.0 * lag_ps);
+        z += sum.z / (2.0 * lag_ps);
+        xy += (sum.x + sum.y) / (4.0 * lag_ps);
+        total += (sum.x + sum.y + sum.z) / (6.0 * lag_ps);
+    }
+};
+
 struct LayerStats {
     ScalarStats beads;
     ComponentStats displacement;
     ComponentStats einstein;
+    std::array<long long, kComponentCount> component_observations{};
+    long long occupied_origins = 0;
+    double volume_exposure_A3 = 0.0;
+    ComponentSums pooled_displacement;
+    ComponentSums pooled_einstein;
 };
 
 struct FixedLagResult {
@@ -228,11 +257,22 @@ void write_component_mean_sd(
         << stats.total.value_or_nan() << '\t' << stats.total.sample_sd();
 }
 
+void write_component_pooled(
+    std::ostream &out, const ComponentSums &sums, long long observations) {
+    const double inverse = observations > 0
+        ? 1.0 / static_cast<double>(observations)
+        : std::numeric_limits<double>::quiet_NaN();
+    out << sums.x * inverse << '\t' << sums.y * inverse << '\t'
+        << sums.z * inverse << '\t' << sums.xy * inverse << '\t'
+        << sums.total * inverse;
+}
+
 FixedLagResult analyze_fixed_lag(
     const std::string &trajectory_file, double target_lag_ps,
     bool report_einstein, const std::filesystem::path &origin_path,
     const std::filesystem::path &layer_origin_path,
     const std::filesystem::path &layer_summary_path,
+    const std::filesystem::path &layer_pooled_summary_path,
     const Options &options, const ModelInfo &info, const DataFile &data,
     const std::string &observable) {
     const long long target_lag_steps = static_cast<long long>(
@@ -290,6 +330,10 @@ FixedLagResult analyze_fixed_lag(
     if (report_einstein)
         layers_out << "\tD_E_x_A2_per_ps\tD_E_y_A2_per_ps"
             << "\tD_E_z_A2_per_ps\tD_E_xy_A2_per_ps\tD_E_3D_A2_per_ps";
+    layers_out << "\tall_beads\tcrosslinker_beads\tmoderator_beads"
+        << "\tfiller_beads\tlayer_volume_A3\tall_bead_density_A-3"
+        << "\tstrand_bead_density_A-3\tcrosslinker_bead_density_A-3"
+        << "\tmoderator_bead_density_A-3\tfiller_bead_density_A-3";
     layers_out << '\n';
     origins_out << std::setprecision(12);
     layers_out << std::setprecision(12);
@@ -339,6 +383,19 @@ FixedLagResult analyze_fixed_lag(
 
         std::vector<Vec3> squared_sum(static_cast<std::size_t>(bins));
         std::vector<long long> bin_counts(static_cast<std::size_t>(bins), 0);
+        std::vector<std::array<long long, kComponentCount>> component_counts(
+            static_cast<std::size_t>(bins));
+        for (long long id = 1; id <= data.declared_atoms; ++id) {
+            const Vec3 position =
+                origin.unwrapped[static_cast<std::size_t>(id)];
+            const int bin = bin_index(
+                position.z + recenter_shift, reference_box, bins,
+                info.periodic_z());
+            const int component = component_for_molecule(
+                data.atoms[static_cast<std::size_t>(id)].molecule, info);
+            ++component_counts[static_cast<std::size_t>(bin)]
+                [static_cast<std::size_t>(component)];
+        }
         Vec3 global_sum;
         for (const long long id : strand_ids) {
             const Vec3 origin_position =
@@ -394,6 +451,12 @@ FixedLagResult analyze_fixed_lag(
 
         for (int bin = 0; bin < bins; ++bin) {
             const long long count = bin_counts[static_cast<std::size_t>(bin)];
+            const auto &counts =
+                component_counts[static_cast<std::size_t>(bin)];
+            const long long all_count = std::accumulate(
+                counts.begin(), counts.end(), 0LL);
+            const double layer_volume_A3 =
+                origin.box.lx() * origin.box.ly() * width;
             const Vec3 value = count > 0
                 ? (1.0 / count) * squared_sum[static_cast<std::size_t>(bin)]
                 : Vec3{std::numeric_limits<double>::quiet_NaN(),
@@ -412,10 +475,30 @@ FixedLagResult analyze_fixed_lag(
                     << '\t' << (value.x + value.y) / (4.0 * actual_lag_ps)
                     << '\t' << (value.x + value.y + value.z) /
                         (6.0 * actual_lag_ps);
+            layers_out << '\t' << all_count << '\t'
+                << counts[static_cast<std::size_t>(kCrosslinker)] << '\t'
+                << counts[static_cast<std::size_t>(kModerator)] << '\t'
+                << counts[static_cast<std::size_t>(kFiller)] << '\t'
+                << layer_volume_A3 << '\t'
+                << all_count / layer_volume_A3 << '\t'
+                << count / layer_volume_A3 << '\t'
+                << counts[static_cast<std::size_t>(kCrosslinker)] /
+                    layer_volume_A3 << '\t'
+                << counts[static_cast<std::size_t>(kModerator)] /
+                    layer_volume_A3 << '\t'
+                << counts[static_cast<std::size_t>(kFiller)] /
+                    layer_volume_A3;
             layers_out << '\n';
 
             LayerStats &stats = result.layers[static_cast<std::size_t>(bin)];
             stats.beads.add(static_cast<double>(count));
+            stats.volume_exposure_A3 += layer_volume_A3;
+            for (int component = 0; component < kComponentCount; ++component) {
+                const long long component_count =
+                    counts[static_cast<std::size_t>(component)];
+                stats.component_observations[static_cast<std::size_t>(component)] +=
+                    component_count;
+            }
             stats.displacement.add(value);
             if (report_einstein && count > 0) {
                 stats.einstein.x.add(d.x);
@@ -426,6 +509,15 @@ FixedLagResult analyze_fixed_lag(
                 stats.einstein.total.add(
                     (value.x + value.y + value.z) /
                     (6.0 * actual_lag_ps));
+            }
+            if (count > 0) {
+                ++stats.occupied_origins;
+                stats.pooled_displacement.add_displacement(
+                    squared_sum[static_cast<std::size_t>(bin)]);
+                if (report_einstein)
+                    stats.pooled_einstein.add_einstein(
+                        squared_sum[static_cast<std::size_t>(bin)],
+                        actual_lag_ps);
             }
         }
         ++result.origins;
@@ -462,6 +554,82 @@ FixedLagResult analyze_fixed_lag(
             write_component_mean_sd(summary, stats.einstein);
         }
         summary << '\n';
+    }
+
+    std::ofstream pooled(layer_pooled_summary_path);
+    if (!pooled)
+        throw std::runtime_error(
+            "cannot write " + layer_pooled_summary_path.string());
+    pooled << "bin\tzlo_aligned_A\tzhi_aligned_A\torigins_total"
+        << "\torigins_occupied\torigin_coverage\tmean_layer_volume_A3"
+        << "\tall_bead_observations\tstrand_bead_observations"
+        << "\tcrosslinker_bead_observations\tmoderator_bead_observations"
+        << "\tfiller_bead_observations\tmean_all_beads\tmean_strand_beads"
+        << "\tmean_crosslinker_beads\tmean_moderator_beads"
+        << "\tmean_filler_beads\tall_bead_density_A-3"
+        << "\tstrand_bead_density_A-3\tcrosslinker_bead_density_A-3"
+        << "\tmoderator_bead_density_A-3\tfiller_bead_density_A-3"
+        << "\tpooled_mean_x_A2\tpooled_mean_y_A2\tpooled_mean_z_A2"
+        << "\tpooled_mean_xy_A2\tpooled_mean_3D_A2";
+    if (report_einstein)
+        pooled << "\tpooled_D_E_x_A2_per_ps\tpooled_D_E_y_A2_per_ps"
+            << "\tpooled_D_E_z_A2_per_ps\tpooled_D_E_xy_A2_per_ps"
+            << "\tpooled_D_E_3D_A2_per_ps";
+    pooled << '\n' << std::setprecision(12);
+    for (int bin = 0; bin < bins; ++bin) {
+        const LayerStats &stats = result.layers[static_cast<std::size_t>(bin)];
+        const double zlo = reference_box.zlo + bin * width;
+        const long long strand_observations =
+            stats.component_observations[static_cast<std::size_t>(kStrand)];
+        const long long all_observations = std::accumulate(
+            stats.component_observations.begin(),
+            stats.component_observations.end(), 0LL);
+        const double inverse_origins = result.origins > 0
+            ? 1.0 / static_cast<double>(result.origins)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double inverse_volume = stats.volume_exposure_A3 > 0.0
+            ? 1.0 / stats.volume_exposure_A3
+            : std::numeric_limits<double>::quiet_NaN();
+        pooled << bin + 1 << '\t' << zlo << '\t' << zlo + width << '\t'
+            << result.origins << '\t' << stats.occupied_origins << '\t'
+            << stats.occupied_origins * inverse_origins << '\t'
+            << stats.volume_exposure_A3 * inverse_origins << '\t'
+            << all_observations << '\t' << strand_observations << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kCrosslinker)] << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kModerator)] << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kFiller)] << '\t'
+            << all_observations * inverse_origins << '\t'
+            << strand_observations * inverse_origins << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kCrosslinker)] * inverse_origins
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kModerator)] * inverse_origins
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kFiller)] * inverse_origins
+            << '\t' << all_observations * inverse_volume << '\t'
+            << strand_observations * inverse_volume << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kCrosslinker)] * inverse_volume
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kModerator)] * inverse_volume
+            << '\t'
+            << stats.component_observations[
+                   static_cast<std::size_t>(kFiller)] * inverse_volume
+            << '\t';
+        write_component_pooled(
+            pooled, stats.pooled_displacement, strand_observations);
+        if (report_einstein) {
+            pooled << '\t';
+            write_component_pooled(
+                pooled, stats.pooled_einstein, strand_observations);
+        }
+        pooled << '\n';
     }
     return result;
 }
@@ -526,8 +694,12 @@ void write_report(
         << "target matching: nearest recorded frame, requiring a bracketing"
         << " frame at or after the requested lag\n"
         << "layer assignment: component-1 z position at each time origin\n"
+        << "layer pooled means: bead-origin weighted; sparse origins do not"
+        << " receive equal weight with dense origins\n"
+        << "layer density: all components counted at the same post-release"
+        << " time origins used by each fixed-lag observable\n"
         << "film recentering: "
-        << (options.recenter_film ?
+        << (info.geometry == "film" && options.recenter_film ?
             "origin strand midplane aligned to the reference box midplane" :
             "disabled") << "\n"
         << "origin SD warning: origins may be correlated; the reported SD is"
@@ -626,6 +798,8 @@ int main(int argc, char **argv) {
             directory / ("fixed_lag_msd_origins." + name + ".tsv"),
             directory / ("fixed_lag_msd_layers." + name + ".tsv"),
             directory / ("fixed_lag_msd_layer_summary." + name + ".tsv"),
+            directory /
+                ("fixed_lag_msd_layer_pooled_summary." + name + ".tsv"),
             options, info, data, "msd_fixed_lag");
         const FixedLagResult dw = analyze_fixed_lag(
             options.debye_waller_trajectory_file,
@@ -633,6 +807,8 @@ int main(int argc, char **argv) {
             directory / ("fixed_lag_u2_origins." + name + ".tsv"),
             directory / ("fixed_lag_u2_layers." + name + ".tsv"),
             directory / ("fixed_lag_u2_layer_summary." + name + ".tsv"),
+            directory /
+                ("fixed_lag_u2_layer_pooled_summary." + name + ".tsv"),
             options, info, data, "u2_fixed_lag");
         write_global_summary(
             directory / ("fixed_lag_summary." + name + ".tsv"), msd, dw);

@@ -95,9 +95,11 @@ for output in \
     fixed_lag_msd_origins.fixed_lag.tsv \
     fixed_lag_msd_layers.fixed_lag.tsv \
     fixed_lag_msd_layer_summary.fixed_lag.tsv \
+    fixed_lag_msd_layer_pooled_summary.fixed_lag.tsv \
     fixed_lag_u2_origins.fixed_lag.tsv \
     fixed_lag_u2_layers.fixed_lag.tsv \
     fixed_lag_u2_layer_summary.fixed_lag.tsv \
+    fixed_lag_u2_layer_pooled_summary.fixed_lag.tsv \
     fixed_lag_summary.fixed_lag.tsv \
     fixed_lag_report.fixed_lag.txt
 do
@@ -134,5 +136,52 @@ awk -F '\t' '
 ' "$fixed_output/fixed_lag_msd_origins.fixed_lag.tsv"
 grep -q 'origins may be correlated' \
     "$fixed_output/fixed_lag_report.fixed_lag.txt"
+grep -q 'bead-origin weighted' \
+    "$fixed_output/fixed_lag_report.fixed_lag.txt"
+
+raw_layers="$fixed_output/fixed_lag_msd_layers.fixed_lag.tsv"
+pooled_layers="$fixed_output/fixed_lag_msd_layer_pooled_summary.fixed_lag.tsv"
+awk -F '\t' '
+    FNR == NR {
+        if (FNR == 1) {
+            for (i = 1; i <= NF; ++i) {
+                if ($i == "bin") raw_bin = i
+                if ($i == "strand_beads") raw_beads = i
+                if ($i == "msd_xy_A2") raw_value = i
+            }
+            next
+        }
+        weighted[$raw_bin] += $raw_beads * $raw_value
+        observations[$raw_bin] += $raw_beads
+        next
+    }
+    FNR == 1 {
+        for (i = 1; i <= NF; ++i) {
+            if ($i == "bin") pooled_bin = i
+            if ($i == "strand_bead_observations") pooled_beads = i
+            if ($i == "pooled_mean_xy_A2") pooled_value = i
+            if ($i == "pooled_D_E_xy_A2_per_ps") pooled_diffusion = i
+        }
+        next
+    }
+    $pooled_beads > 0 {
+        expected = weighted[$pooled_bin] / observations[$pooled_bin]
+        if (($pooled_value - expected)^2 > 1e-20) exit 1
+        if (($pooled_diffusion - expected / 40000.0)^2 > 1e-24) exit 1
+        checked = 1
+    }
+    END { exit !checked }
+' "$raw_layers" "$pooled_layers"
+
+declared_atoms=$(awk '$2 == "atoms" { print $1; exit }' "$data_file")
+awk -F '\t' -v declared_atoms="$declared_atoms" '
+    NR == 1 {
+        for (i = 1; i <= NF; ++i)
+            if ($i == "mean_all_beads") all_beads = i
+        next
+    }
+    { total += $all_beads }
+    END { if ((total - declared_atoms)^2 > 1e-12) exit 1 }
+' "$pooled_layers"
 
 echo "Fixed-lag dynamics analyzer tests passed"

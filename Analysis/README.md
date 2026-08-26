@@ -348,6 +348,22 @@ translation. Long-time film interpretation should emphasize xy; z and 3D
 values remain available but confined z motion is not automatically interpreted
 as diffusion.
 
+The analyzer retains the original equal-origin layer summaries for backward
+compatibility and also writes bead-origin pooled summaries. The pooled
+estimator is
+
+```text
+<Delta r^2>_b = sum_origins sum_beads-in-b(Delta r_i^2)
+                / sum_origins N_b(origin)
+```
+
+so an origin containing only a few surface beads does not receive the same
+weight as a densely populated origin. Every origin-layer row additionally
+contains all-component bead counts, layer volume, and component number
+densities measured from the same post-release trajectory frames used for the
+dynamics calculation. This avoids combining dynamics after wall relocation
+with a density profile from the earlier walled `.npt_eq` configuration.
+
 Outputs in `analysis_<case>/` are:
 
 - `fixed_lag_msd_origins.<case>.tsv` and
@@ -355,7 +371,12 @@ Outputs in `analysis_<case>/` are:
 - `fixed_lag_msd_layers.<case>.tsv` and
   `fixed_lag_u2_layers.<case>.tsv`: one row per origin and z layer;
 - `fixed_lag_msd_layer_summary.<case>.tsv` and
-  `fixed_lag_u2_layer_summary.<case>.tsv`: origin means and origin SD values;
+  `fixed_lag_u2_layer_summary.<case>.tsv`: legacy equal-origin means and
+  origin SD values;
+- `fixed_lag_msd_layer_pooled_summary.<case>.tsv` and
+  `fixed_lag_u2_layer_pooled_summary.<case>.tsv`: bead-origin pooled dynamics,
+  post-release component density, occupied-origin coverage, and observation
+  counts for robust surface-profile filtering or adaptive binning;
 - `fixed_lag_summary.<case>.tsv` and `fixed_lag_report.<case>.txt`.
 
 Origin SD values describe within-trajectory variation. Neighboring origins are
