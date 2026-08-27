@@ -14,6 +14,8 @@ struct Options {
     bool disable_z1 = false;
     std::string output_directory;
     double bin_width = 5.0;
+    double profile_window_width = 5.0;
+    double profile_step = 1.0;
     double wall_fraction = 0.20;
     double core_fraction = 0.20;
     double diffusion_fit_start_fraction = 0.50;
@@ -28,6 +30,41 @@ struct Options {
     long long dw_time_origin_stride = 100;
     long long dw_time_origin_count = 10;
 };
+
+struct SlidingGrid {
+    int fine_bins = 1;
+    double step_A = 1.0;
+    int window_bins = 1;
+    int half_window_bins = 0;
+    double window_width_A = 1.0;
+};
+
+SlidingGrid make_sliding_grid(const Box &box, const Options &options) {
+    SlidingGrid grid;
+    grid.fine_bins = std::max(1, static_cast<int>(
+        std::ceil(box.lz() / options.profile_step)));
+    grid.step_A = box.lz() / grid.fine_bins;
+    const double target_window_bins =
+        options.profile_window_width / grid.step_A;
+    const int maximum_odd_bins =
+        grid.fine_bins % 2 == 0 ? grid.fine_bins - 1 : grid.fine_bins;
+    grid.window_bins = std::clamp(
+        static_cast<int>(std::llround(target_window_bins)), 1,
+        maximum_odd_bins);
+    if (grid.window_bins % 2 == 0) {
+        const int lower = grid.window_bins - 1;
+        const int upper = grid.window_bins + 1;
+        if (upper <= maximum_odd_bins &&
+            std::abs(upper - target_window_bins) <
+                std::abs(lower - target_window_bins))
+            grid.window_bins = upper;
+        else
+            grid.window_bins = lower;
+    }
+    grid.half_window_bins = grid.window_bins / 2;
+    grid.window_width_A = grid.window_bins * grid.step_A;
+    return grid;
+}
 
 constexpr double kAvogadroAngstrom = 0.602214076;
 
@@ -578,12 +615,53 @@ std::vector<BinProfile> static_profile(
     return profile;
 }
 
+struct SlidingProfile {
+    SlidingGrid grid;
+    std::vector<int> center_indices;
+    std::vector<BinProfile> windows;
+};
+
+SlidingProfile make_sliding_profile(
+    const std::vector<BinProfile> &fine_profile, const SlidingGrid &grid,
+    bool periodic_z) {
+    SlidingProfile result;
+    result.grid = grid;
+    const int first_center = periodic_z ? 0 : grid.half_window_bins;
+    const int final_center = periodic_z
+        ? grid.fine_bins : grid.fine_bins - grid.half_window_bins;
+    result.center_indices.reserve(
+        static_cast<std::size_t>(std::max(0, final_center - first_center)));
+    result.windows.reserve(result.center_indices.capacity());
+    for (int center = first_center; center < final_center; ++center) {
+        BinProfile window;
+        for (int offset = -grid.half_window_bins;
+             offset <= grid.half_window_bins; ++offset) {
+            int fine_bin = center + offset;
+            if (periodic_z) {
+                fine_bin %= grid.fine_bins;
+                if (fine_bin < 0) fine_bin += grid.fine_bins;
+            }
+            add_profile(
+                window, fine_profile[static_cast<std::size_t>(fine_bin)]);
+        }
+        result.center_indices.push_back(center);
+        result.windows.push_back(std::move(window));
+    }
+    return result;
+}
+
 void write_profile(
     const std::filesystem::path &path, const std::vector<BinProfile> &profile,
-    const DataFile &data, const ModelInfo &info, bool z1_available) {
+    const DataFile &data, const ModelInfo &info, bool z1_available,
+    const SlidingProfile *sliding = nullptr) {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("cannot write " + path.string());
-    out << "bin\tzlo_A\tzhi_A\tz_center_A\tvolume_A3\tcrosslink_bonds"
+    if (sliding == nullptr)
+        out << "bin\tzlo_A\tzhi_A\tz_center_A\tvolume_A3";
+    else
+        out << "window\tz_center_A\tzlo_A\tzhi_A\tstep_A"
+            << "\twindow_width_A\tvolume_A3";
+    out << "\tcrosslink_bonds"
         << "\tstrand_crosslink_bonds\tmoderator_crosslink_bonds\tjunctions"
         << "\tactive_strands\tdangling_ends\tdangling_loops\tself_loops"
         << "\tisolated_parents\tcrosslink_density_A-3\tdefect_density_A-3"
@@ -616,7 +694,9 @@ void write_profile(
         << "\tz1_data_available\tz1_kinks\tz1_kink_density_A-3"
         << "\tz1_primitive_segments\tz1_primitive_length_A"
         << "\tz1_primitive_length_density_A-2\tz1_primitive_P2_z\n";
-    const double width = data.box.lz() / profile.size();
+    const double width = sliding == nullptr
+        ? data.box.lz() / profile.size()
+        : sliding->grid.window_width_A;
     const double volume = data.box.lx() * data.box.ly() * width;
     const double wall_cutoff = info.geometry == "film"
         ? info.film_wall_cutoff_per_side_angstrom : 0.0;
@@ -628,8 +708,11 @@ void write_profile(
     for (std::size_t bin = 0; bin < profile.size(); ++bin) {
         const BinProfile &entry = profile[bin];
         const BinCounts &counts = entry.topology;
-        const double zlo = data.box.zlo + bin * width;
-        const double center = zlo + 0.5 * width;
+        const double center = sliding == nullptr
+            ? data.box.zlo + (bin + 0.5) * width
+            : data.box.zlo +
+                (sliding->center_indices[bin] + 0.5) * sliding->grid.step_A;
+        const double zlo = center - 0.5 * width;
         const double distance_box = std::min(
             center - data.box.zlo, data.box.zhi - center);
         const double material_z =
@@ -659,9 +742,15 @@ void write_profile(
         const double z1_p2z = z1_available
             ? mean_or_nan(entry.z1_segment_p2z_sum, entry.z1_segments) :
               std::numeric_limits<double>::quiet_NaN();
-        out << bin + 1 << '\t' << zlo << '\t' << zlo + width << '\t'
-            << center << '\t' << volume << '\t'
-            << counts.crosslink_bonds << '\t' << counts.strand_crosslink_bonds
+        if (sliding == nullptr)
+            out << bin + 1 << '\t' << zlo << '\t' << zlo + width << '\t'
+                << center << '\t' << volume;
+        else
+            out << bin + 1 << '\t' << center << '\t' << zlo << '\t'
+                << zlo + width << '\t' << sliding->grid.step_A << '\t'
+                << width << '\t' << volume;
+        out << '\t' << counts.crosslink_bonds << '\t'
+            << counts.strand_crosslink_bonds
             << '\t' << counts.moderator_crosslink_bonds << '\t' << counts.junctions
             << '\t' << counts.active_strands << '\t' << counts.dangling_ends
             << '\t' << counts.dangling_loops << '\t' << counts.self_loops
@@ -737,7 +826,8 @@ void write_profile(
 
 void write_folded_profile(
     const std::filesystem::path &path, const std::vector<BinProfile> &profile,
-    const DataFile &data, const ModelInfo &info, bool z1_available) {
+    const DataFile &data, const ModelInfo &info, bool z1_available,
+    const SlidingProfile *sliding = nullptr) {
     const std::size_t folded_bins = (profile.size() + 1) / 2;
     std::vector<BinProfile> folded(folded_bins);
     std::vector<int> multiplicity(folded_bins, 0);
@@ -749,7 +839,10 @@ void write_folded_profile(
     std::ofstream out(path);
     if (!out) throw std::runtime_error("cannot write " + path.string());
     out << "folded_bin\tdistance_box_lo_A\tdistance_box_hi_A"
-        << "\tdistance_box_center_A\tdistance_effective_wall_center_A"
+        << "\tdistance_box_center_A";
+    if (sliding != nullptr)
+        out << "\tstep_A\twindow_width_A";
+    out << "\tdistance_effective_wall_center_A"
         << "\tnormalized_distance_effective_wall\tpaired_full_bins\tvolume_A3"
         << "\tmass_density_total_g_cm-3\tcrosslink_density_A-3"
         << "\tjunction_density_A-3\tactive_strand_density_A-3"
@@ -759,7 +852,9 @@ void write_folded_profile(
         << "\tactive_Ree_parallel2_mean_A2\tactive_Ree_z2_mean_A2"
         << "\tz1_data_available\tz1_kinks\tz1_kink_density_A-3"
         << "\tz1_primitive_length_density_A-2\tz1_primitive_P2_z\n";
-    const double width = data.box.lz() / profile.size();
+    const double width = sliding == nullptr
+        ? data.box.lz() / profile.size()
+        : sliding->grid.window_width_A;
     const double area = data.box.lx() * data.box.ly();
     const double wall_cutoff = info.geometry == "film"
         ? info.film_wall_cutoff_per_side_angstrom : 0.0;
@@ -770,9 +865,19 @@ void write_folded_profile(
     out << std::setprecision(12);
     for (std::size_t bin = 0; bin < folded.size(); ++bin) {
         const BinProfile &entry = folded[bin];
-        const double distance_lo = bin * width;
-        const double distance_hi = std::min((bin + 1) * width, 0.5 * data.box.lz());
-        const double center = 0.5 * (distance_lo + distance_hi);
+        const double center = sliding == nullptr
+            ? (bin + 0.5) * width
+            : std::min(
+                data.box.zlo +
+                    (sliding->center_indices[bin] + 0.5) *
+                        sliding->grid.step_A - data.box.zlo,
+                data.box.zhi -
+                    (data.box.zlo +
+                     (sliding->center_indices[bin] + 0.5) *
+                         sliding->grid.step_A));
+        const double distance_lo = std::max(0.0, center - 0.5 * width);
+        const double distance_hi = std::min(
+            center + 0.5 * width, 0.5 * data.box.lz());
         const double volume = area * width * multiplicity[bin];
         double mass = 0.0;
         long long total_sites = 0, reacted_sites = 0;
@@ -786,7 +891,10 @@ void write_folded_profile(
             entry.topology.isolated_parents;
         const auto density = [&](double value) { return value / volume; };
         out << bin + 1 << '\t' << distance_lo << '\t' << distance_hi << '\t'
-            << center << '\t' << center - wall_cutoff << '\t'
+            << center;
+        if (sliding != nullptr)
+            out << '\t' << sliding->grid.step_A << '\t' << width;
+        out << '\t' << center - wall_cutoff << '\t'
             << 2.0 * (center - wall_cutoff) / material_thickness << '\t'
             << multiplicity[bin] << '\t' << volume << '\t'
             << mass / (kAvogadroAngstrom * volume) << '\t'
@@ -1738,11 +1846,19 @@ void write_report(
     const std::string &z1_sp_file) {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("cannot write " + path.string());
+    const SlidingGrid sliding_grid = make_sliding_grid(data.box, options);
     out << "PDMS network distribution and dynamics report\n"
         << "case: " << info.case_name << "\n"
         << "geometry: " << info.geometry << "\n"
         << "z bins: " << bins << "\n"
         << "realized bin width: " << data.box.lz() / bins << " A\n"
+        << "static sliding profile requested window / step: "
+        << options.profile_window_width << " / " << options.profile_step
+        << " A\n"
+        << "static sliding profile realized window / step: "
+        << sliding_grid.window_width_A << " / " << sliding_grid.step_A
+        << " A\n"
+        << "static sliding windows overlap and are not independent samples\n"
         << "static markers: reaction-bond midpoints, reduced-strand midpoints,"
         << " free dangling ends, loop markers, and parent centers\n"
         << "densities use the full lateral box area and physical bin volume\n"
@@ -1841,6 +1957,8 @@ void print_help(const char *program) {
         << "  --z1-sp FILE         override the default Z1+SP.dat path\n"
         << "  --no-z1              disable default Z1+SP.dat auto-detection\n"
         << "  --bin-width X        target z-bin width in A (default 5)\n"
+        << "  --profile-window X   sliding static-profile window in A (default 5)\n"
+        << "  --profile-step X     sliding static-profile center spacing in A (default 1)\n"
         << "  --wall-fraction X    material fraction at each wall for summary (default 0.20)\n"
         << "  --core-fraction X    centered material fraction for summary (default 0.20)\n"
         << "  --frame-stride N     analyze every Nth trajectory frame (default 1)\n"
@@ -1885,6 +2003,10 @@ Options parse_options(int argc, char **argv) {
             options.z1_sp_file = value();
         else if (option == "--no-z1") options.disable_z1 = true;
         else if (option == "--bin-width") options.bin_width = std::stod(value());
+        else if (option == "--profile-window")
+            options.profile_window_width = std::stod(value());
+        else if (option == "--profile-step")
+            options.profile_step = std::stod(value());
         else if (option == "--wall-fraction")
             options.wall_fraction = std::stod(value());
         else if (option == "--core-fraction")
@@ -1915,6 +2037,10 @@ Options parse_options(int argc, char **argv) {
         else throw std::runtime_error("unknown option: " + option);
     }
     if (options.bin_width <= 0.0) throw std::runtime_error("bin width must be positive");
+    if (!(options.profile_window_width > 0.0))
+        throw std::runtime_error("profile window must be positive");
+    if (!(options.profile_step > 0.0))
+        throw std::runtime_error("profile step must be positive");
     if (!(options.wall_fraction > 0.0 && options.wall_fraction < 0.5))
         throw std::runtime_error("wall fraction must be between 0 and 0.5");
     if (!(options.core_fraction > 0.0 && options.core_fraction <= 1.0))
@@ -1988,6 +2114,20 @@ int main(int argc, char **argv) {
         write_profile_summary(
             directory / ("network_z_profile_summary." + name + ".tsv"),
             profile, data, info, options, z1 != nullptr);
+        const SlidingGrid sliding_grid = make_sliding_grid(data.box, options);
+        const std::vector<BinProfile> fine_profile = static_profile(
+            data, info, network, sliding_grid.fine_bins, z1);
+        const SlidingProfile sliding_profile = make_sliding_profile(
+            fine_profile, sliding_grid, info.periodic_z());
+        write_profile(
+            directory / ("network_z_profile_sliding." + name + ".tsv"),
+            sliding_profile.windows, data, info, z1 != nullptr,
+            &sliding_profile);
+        write_folded_profile(
+            directory /
+                ("network_z_profile_sliding_folded." + name + ".tsv"),
+            sliding_profile.windows, data, info, z1 != nullptr,
+            &sliding_profile);
         if (!options.debye_waller_trajectory_file.empty())
             write_debye_waller(
                 directory / ("debye_waller_global." + name + ".tsv"),

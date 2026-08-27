@@ -957,6 +957,8 @@ profile_analysis="$test_root/profile_analysis"
 test -s "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
 test -s "$profile_analysis/network_z_profile_folded.ring_bifunctional.tsv"
 test -s "$profile_analysis/network_z_profile_summary.ring_bifunctional.tsv"
+test -s "$profile_analysis/network_z_profile_sliding.ring_bifunctional.tsv"
+test -s "$profile_analysis/network_z_profile_sliding_folded.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_dynamics.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_diffusion.ring_bifunctional.tsv"
 test -s "$profile_analysis/layer_dynamics_time_averaged.ring_bifunctional.tsv"
@@ -1027,6 +1029,30 @@ awk -F '\t' '
 ' "$profile_analysis/network_z_profile.ring_bifunctional.tsv"
 grep -q '^z1_kink_density' \
     "$profile_analysis/network_z_profile_summary.ring_bifunctional.tsv"
+awk -F '\t' '
+    function abs(value) { return value < 0 ? -value : value }
+    NR == 1 {
+        for (column = 1; column <= NF; ++column) header[$column] = column
+        next
+    }
+    {
+        rows++
+        width = $header["zhi_A"] - $header["zlo_A"]
+        if (width <= $header["step_A"] ||
+            abs(width - $header["window_width_A"]) > 1.0e-8 ||
+            $header["volume_A3"] <= 0) bad = 1
+        delta = $header["z_center_A"] - previous - $header["step_A"]
+        if (rows > 1 && abs(delta) > 1.0e-8) bad = 1
+        previous = $header["z_center_A"]
+        mass += $header["mass_density_total_g_cm-3"]
+        available += $header["z1_data_available"]
+    }
+    END { exit !(rows > 1 && !bad && mass > 0 && available > 0) }
+' "$profile_analysis/network_z_profile_sliding.ring_bifunctional.tsv"
+grep -q $'^folded_bin\tdistance_box_lo_A\tdistance_box_hi_A\tdistance_box_center_A\tstep_A\twindow_width_A' \
+    "$profile_analysis/network_z_profile_sliding_folded.ring_bifunctional.tsv"
+grep -q '^static sliding profile realized window / step:' \
+    "$profile_analysis/profile_report.ring_bifunctional.txt"
 
 profile_auto_analysis="$test_root/profile_auto_analysis"
 mkdir -p "$profile_auto_analysis"

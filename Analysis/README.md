@@ -143,6 +143,30 @@ Static z profiles need only the final snapshot:
     --bin-width 5
 ```
 
+The analyzer retains this independent, non-overlapping profile and also writes
+a high-resolution sliding profile by default. Each sliding value averages a
+5 A window, while neighboring window centers are spaced approximately 1 A
+apart. Use `--profile-window X` and `--profile-step X` to change the two
+lengths independently. As in the fixed-lag dynamics analyzer, the box is first
+divided into fine cells at the requested step and the nearest odd number of
+cells is combined at each center. The realized step and window width are
+recorded in every row. Film windows are emitted only where the complete window
+lies inside the box; bulk windows wrap periodically in z.
+
+The additional outputs are:
+
+- `network_z_profile_sliding.<case>.tsv`, containing the same static density,
+  conversion, defect, conformation, orientation, and Z1+ observables as the
+  independent-bin profile;
+- `network_z_profile_sliding_folded.<case>.tsv`, pairing windows at equal
+  distances from the two box boundaries.
+
+Neighboring sliding windows overlap and are strongly correlated. They provide
+matched coordinates for comparison with the 5 A-window / 1 A-step fixed-lag
+dynamics profiles and more precise boundary localization; they must not be
+treated as independent spatial samples. Use independent simulation replicas
+for uncertainty estimates.
+
 The original reaction-bond, junction, active-strand, dangling-end,
 dangling-loop, self-loop, isolated-parent, crosslink-density, and
 defect-density columns remain at the beginning of
