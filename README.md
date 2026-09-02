@@ -264,15 +264,111 @@ while avoiding the other components and box boundaries.
 
 ## Simulation template
 
-The generated LAMMPS input first minimizes the initial coordinates at fixed box
-dimensions using the 800 K force field. The conjugate-gradient minimizer uses
-a conservative 0.1 A maximum bead displacement per iteration to relax severe
-initial overlaps; film-wall energies are included during this stage. It then
-assigns all beads Gaussian velocities at 800 K using the reproducible `--seed`,
-with net linear and angular momentum removed. Without a conversion target, it
-retains the original time-controlled workflow: relax, compress while
-crosslinking, continue crosslinking for a fixed time, cool to 300 K, and
-equilibrate.
+The generated LAMMPS input applies the same preparation sequence to every
+strand topology. Molecular architecture changes the initial bonded graph and
+reactive-site locations, but not the standard minimization, curing, cooling,
+or final-equilibration stages. The timestep is 5 fs, so 1,000,000 steps
+correspond to 5 ns.
+
+### Standard conversion-controlled workflow
+
+The production workflow used when `--target-conversion X` is supplied is:
+
+```text
+Initial configuration: data.<case> + <case>.info
+  user-selected topology, composition, stoichiometry, density and geometry
+                                |
+                                v
+800 K force field and boundary conditions
+  bulk: periodic x/y/z
+  film: periodic x/y, fixed z, two repulsive walls
+                                |
+                                v
+Conjugate-gradient energy minimization at fixed box dimensions
+  maximum bead displacement = 0.1 A per minimizer iteration
+                                |
+                                v
+Assign Gaussian velocities at 800 K
+  reproducible seed; zero net linear and angular momentum
+                                |
+                                v
+800 K NVT equilibration: 1,000,000 steps (5 ns)
+                                |
+                                +--> data.<case>.rep_800
+                                |
+                                v
+Compress without reactions to 0.5 g/cm3: 1,000,000 steps (5 ns)
+  bulk: deform x/y/z
+  film: deform x/y while Lz remains fixed
+                                |
+                                v
+Conversion-controlled curing at 800 K and 0.5 g/cm3
+  fix bond/create probability = 0.5
+  stop at the requested new-bond count or after 5,000,000 steps (25 ns)
+                                |
+                                v
+Remove bond/create and halt fixes; network connectivity is now frozen
+                                |
+                                v
+Compress from 0.5 g/cm3 to the requested target density
+  1,000,000 steps (5 ns); bulk x/y/z or film x/y only
+                                |
+                                v
+Post-cure 800 K NVT equilibration: 1,000,000 steps (5 ns)
+                                |
+                                +--> data.<case>.xlink_800
+                                |
+                                v
+Restore the 300 K PDMS pair, reacted-bond and film-wall parameters
+                                |
+                                v
+Cool from 800 K to 300 K at 1 atm: 1,000,000 steps (5 ns)
+  bulk: isotropic NPT
+  film: xy-coupled NPT with fixed Lz
+                                |
+                                +--> data.<case>.300
+                                |
+                                v
+Final 300 K, 1 atm equilibration: 1,000,000 steps (5 ns)
+  bulk: isotropic NPT
+  film: xy-coupled NPT with fixed Lz
+                                |
+                                v
+Final equilibrated network: data.<case>.npt_eq
+  common input for topology, profiles, Z1+, dynamics and tensile tests
+```
+
+The fixed part of this protocol contains 6,000,000 steps. Including the curing
+hold, the final `.npt_eq` state is reached after at most 11,000,000 steps, or
+55 ns. The actual duration is shorter when the conversion target is detected
+before the 5,000,000-step curing limit.
+
+The bulk and film branches differ only in boundary and box control:
+
+```text
+Bulk system                         Film system
+-----------                         -----------
+boundary p p p                      boundary p p f
+no confining walls                  repulsive walls at both z edges
+x/y/z compression                   x/y compression; Lz fixed
+isotropic NPT cooling               xy-coupled NPT cooling; Lz fixed
+isotropic final NPT                 xy-coupled final NPT; Lz fixed
+```
+
+For a film, the requested thickness is the nominal 300 K wall-force-free
+material thickness, not the complete box length. The wall-confined
+`data.<case>.npt_eq` state is the end of network preparation. Moving the walls
+away from the material for effectively free-surface dynamics is a separate,
+nonreactive workflow described under [Extended layer dynamics](#extended-layer-dynamics).
+
+The minimization uses the 800 K force field at fixed box dimensions. Its
+conservative displacement limit relaxes severe initial overlaps, and film-wall
+energies are included during this stage. If no conversion target is supplied,
+the generator retains the original time-controlled route: initial relaxation,
+compression with active crosslinking, a fixed-duration curing hold, cooling,
+and final equilibration.
+
+### Conversion control
 
 Supplying `--target-conversion X` enables conversion-controlled curing. The
 generator calculates
@@ -306,6 +402,11 @@ overshoot.
 
 Every workflow finishes by writing an independent 1,000,000-step NVT
 trajectory for MSD analysis.
+
+The built-in MSD trajectory is produced only after `data.<case>.npt_eq` has
+been written and is not part of the network-preparation time quoted above.
+The longer, layer-resolved dynamics workflow is generated independently from
+the same `.npt_eq` and `.info` pair.
 
 The generated Slurm file is a template for the Iowa State Nova environment.
 Review its modules, partition, memory, wall time, and email before use on a
