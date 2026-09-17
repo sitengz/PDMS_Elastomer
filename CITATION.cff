@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software in your research, please cite it using the
+  metadata below.
+title: >-
+  PDMS Elastomer: Coarse-Grained PDMS Elastomer Generation and Analysis
+  Workflow
+type: software
+authors:
+  - family-names: Zhang
+    given-names: Siteng
+repository-code: https://github.com/sitengz/PDMS_Elastomer
+license: MIT
+abstract: >-
+  An open-source workflow for constructing, simulating, and analyzing
+  coarse-grained poly(dimethylsiloxane) elastomer networks with linear,
+  ring, star, comb-like, and bottlebrush strand architectures.
+keywords:
+  - PDMS
+  - polymer networks
+  - molecular dynamics
+  - coarse-grained simulation
+  - network topology
