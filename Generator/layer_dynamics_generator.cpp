@@ -333,7 +333,9 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
         << "neigh_modify    delay 5 every 1 check yes\n"
         << "timestep        " << kTimestepFs << "\n";
 
-    output << "\n# The .npt_eq Velocities section is retained; no velocity reinitialization.\n";
+    const std::string diagnostics = info.geometry == "film"
+        ? " v_com_z v_vcm_z f_zlo_guard[1] f_zhi_guard[1]" : "";
+    output << "\n# Retain thermal velocities; remove film translation once after wall release.\n";
     if (info.geometry == "film") {
         output << "# Add vacuum on both z sides, then place remote repulsive guard walls\n"
             << "# at the expanded edges. The original material-adjacent walls are not restored.\n"
@@ -346,11 +348,14 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
             << guard_wall.epsilon << ' ' << guard_wall.sigma << ' '
             << guard_wall_cutoff << " units box\n"
             << "fix_modify      zlo_guard energy yes\n"
-            << "fix_modify      zhi_guard energy yes\n";
+            << "fix_modify      zhi_guard energy yes\n"
+            << "velocity        all zero linear\n"
+            << "variable        com_z equal xcm(all,z)\n"
+            << "variable        vcm_z equal vcm(all,z)\n";
     }
     output << "\nthermo          " << settings.thermo_every << "\n"
         << "thermo_style    custom step time temp density lx ly lz"
-        << " etotal epair ebond eangle edihed\n"
+        << " etotal epair ebond eangle edihed" << diagnostics << "\n"
         << "thermo_modify   flush yes\n\n"
         << "restart         " << settings.restart_every << " restart."
         << info.case_name << ".layer_dynamics.1 restart."
@@ -359,6 +364,7 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
         << "fix             equilibrate all nvt temp " << kTemperatureK << ' '
         << kTemperatureK << " 50.0\n"
         << "run             " << settings.surface_equilibration_steps << "\n"
+        << "write_restart   checkpoint.equil.restart\n"
         << "unfix           equilibrate\n"
         << "write_data      " << files.equilibrated_data << " nocoeff\n\n"
         << "# Short, high-frequency trajectory for the Debye-Waller displacement.\n"
@@ -367,7 +373,7 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
         << "thermo          " << settings.thermo_every << "\n"
         << "thermo_style    custom step time temp density lx ly lz"
         << " c_global_dw[1] c_global_dw[2] c_global_dw[3] c_global_dw[4]"
-        << " etotal epair ebond eangle edihed\n"
+        << " etotal epair ebond eangle edihed" << diagnostics << "\n"
         << "thermo_modify   flush yes\n\n"
         << "# First frame is the Debye-Waller displacement origin.\n"
         << "dump            dw all custom " << settings.debye_waller_dump_every << ' '
@@ -376,6 +382,7 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
         << "fix             dw_integrate all nvt temp " << kTemperatureK << ' '
         << kTemperatureK << " 50.0\n\n"
         << "run             " << settings.debye_waller_steps << "\n"
+        << "write_restart   checkpoint.dw.restart\n"
         << "unfix           dw_integrate\n"
         << "undump          dw\n"
         << "uncompute       global_dw\n\n"
@@ -384,7 +391,7 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
         << "compute         global_msd all msd com yes\n"
         << "thermo_style    custom step time temp density lx ly lz"
         << " c_global_msd[1] c_global_msd[2] c_global_msd[3] c_global_msd[4]"
-        << " etotal epair ebond eangle edihed\n"
+        << " etotal epair ebond eangle edihed" << diagnostics << "\n"
         << "dump            msd all custom " << settings.early_dump_every << ' '
         << files.msd_trajectory << " id mol type x y z ix iy iz\n"
         << "dump_modify     msd first yes sort id\n"
@@ -392,7 +399,8 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
         << kTemperatureK << " 50.0\n\n"
         << "# MSD early-time window: dense sampling through "
         << settings.early_steps * kTimestepFs * 1.0e-6 << " ns.\n"
-        << "run             " << settings.early_steps << "\n";
+        << "run             " << settings.early_steps << "\n"
+        << "write_restart   checkpoint.msd-early.restart\n";
     if (long_steps > 0) {
         output << "\n# Production long-time window: coarser sampling through "
             << settings.production_steps * kTimestepFs * 1.0e-6 << " ns.\n"
@@ -400,11 +408,12 @@ void write_lammps_input(const Settings& settings, const SourceInfo& info,
             << " first no\n"
             << "run             " << long_steps << "\n";
     }
-    output << "\nunfix           msd_integrate\n"
+    output << "\nwrite_restart   checkpoint.msd-final.restart\n"
+        << "unfix           msd_integrate\n"
         << "undump          msd\n"
         << "# Remove compute-dependent thermo fields before deleting the MSD compute.\n"
         << "thermo_style    custom step time temp density lx ly lz"
-        << " etotal epair ebond eangle edihed\n"
+        << " etotal epair ebond eangle edihed" << diagnostics << "\n"
         << "thermo_modify   flush yes\n"
         << "uncompute       global_msd\n"
         << "write_data      " << files.final_data << " nocoeff\n"
@@ -499,6 +508,8 @@ void write_info_file(const Settings& settings, const SourceInfo& info,
         << "    \"production_duration_ns\": "
         << settings.production_steps * kTimestepFs * 1.0e-6 << ",\n"
         << "    \"source_velocities_retained\": true,\n"
+        << "    \"linear_momentum_removed_after_wall_release\": "
+        << (info.geometry == "film" ? "true" : "false") << ",\n"
         << "    \"velocity_reinitialization\": false,\n"
         << "    \"box_dimensions_fixed_during_production\": true,\n"
         << "    \"trajectory_coordinates\": \"wrapped x y z plus ix iy iz\",\n"

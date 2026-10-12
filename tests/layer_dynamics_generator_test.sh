@@ -48,6 +48,7 @@ film_input="$test_root/dynamics_film/layer_dynamics/in.layer_dynamics.dynamics_f
 
 for input in "$bulk_input" "$film_input"; do
     test -f "$input"
+    test "$(grep -c '^write_restart   checkpoint.' "$input")" -eq 4
     grep -q '^comm_modify     cutoff 25$' "$input"
     grep -q '^pair_style      lj/gromacs 12 15$' "$input"
     test "$(grep -c '^reset_timestep  0$' "$input")" -eq 2
@@ -65,7 +66,7 @@ for input in "$bulk_input" "$film_input"; do
     grep -q '^fix             dw_integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
     grep -q '^fix             msd_integrate all nvt temp 300.000000000 300.000000000 50.0$' "$input"
     awk '
-        /^thermo_style    custom step time temp density lx ly lz etotal epair ebond eangle edihed$/ {
+        /^thermo_style    custom step time temp density lx ly lz etotal epair ebond eangle edihed( v_com_z v_vcm_z f_zlo_guard\[1\] f_zhi_guard\[1\])?$/ {
             clean_thermo = NR
         }
         /^uncompute       global_msd$/ { uncompute = NR }
@@ -75,12 +76,17 @@ for input in "$bulk_input" "$film_input"; do
                    uncompute < write_data)
         }
     ' "$input"
-    if grep -Eq '^(velocity|minimize|fix +xlink|fix +deform_box)' "$input"; then
+    if grep -Eq '^(minimize|fix +xlink|fix +deform_box)' "$input"; then
         echo "Layer-dynamics input unexpectedly changes the source state or topology" >&2
         exit 1
     fi
 done
 
+test "$(grep -c '^velocity ' "$bulk_input" || true)" -eq 0
+test "$(grep -c '^velocity ' "$film_input")" -eq 1
+grep -q '^velocity        all zero linear$' "$film_input"
+awk '/^change_box / { expansion=NR } /^velocity / { zero=NR } /^run / && !first { first=NR } END { exit !(expansion < zero && zero < first) }' "$film_input"
+grep -q 'linear_momentum_removed_after_wall_release.*true' "$test_root/dynamics_film/layer_dynamics/layer_dynamics.dynamics_film.info"
 grep -q '^boundary        p p p$' "$bulk_input"
 test "$(grep -c 'wall/lj126' "$bulk_input")" -eq 0
 grep -q '^boundary        p p f$' "$film_input"

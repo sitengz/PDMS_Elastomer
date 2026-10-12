@@ -469,8 +469,11 @@ box edges. The film therefore retains two free material surfaces and wide
 vacuum buffers, while the remote walls prevent detached chains from leaving
 the box. Bulk boxes remain unchanged and periodic.
 
-The source `.npt_eq` velocities are retained and network connectivity is
-unchanged. After wall removal and expansion, the system equilibrates for 1M
+The source thermal velocities and network connectivity are retained. Films
+apply `velocity all zero linear` once after confinement release and box
+expansion, before equilibration. This removes inherited whole-film translation
+without regenerating thermal velocities. Bulk velocities remain unchanged.
+Film thermo output records COM z, COM velocity z and both guard forces. After wall removal and expansion, the system equilibrates for 1M
 steps (5 ns) and writes `data.<case>.free_surface_eq`. A 20,000-step (100 ps)
 Debye-Waller segment is then written every 20 steps (0.1 ps) to
 `dump.debye_waller.<case>.lammpstrj`. After that segment, the dynamics clock
@@ -488,6 +491,18 @@ bash simulations/02_linear_40_high_xlink/film_4Ree/run_layer_dynamics.sh \
 
 Nonstandard source locations use `NPT_EQ_FILE` and `INFO_FILE`, as in the
 tensile runner. Set `LAYER_DYNAMICS_OUTPUT_DIR` to override the output folder.
+
+Timeout recovery must identify the interrupted `run` command in the original
+log before preparing a new attempt folder. Named binary checkpoints are written
+with the active NVT fix at the end of equilibration, Debye-Waller, early MSD
+and final MSD; rotating checkpoints remain available within each phase. Restore
+the same integrator fix ID and absolute timestep target, and merge trajectory
+segments with verified timestamps, frame counts and no duplicate origins.
+Do not reapply the initial momentum reset when continuing a valid checkpoint.
+For a contaminated wall-release attempt, instead copy the original confined
+`.npt_eq` and `.info` into a fresh folder and repeat the full dynamics protocol.
+Preserve old attempts and static analyses; wall contact invalidates free-surface
+interpretation even when analysis subtracts COM displacement.
 
 ## Analysis
 
